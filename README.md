@@ -1,1 +1,1 @@
-Mouse Pangenome Reference Consortium
+Draft Mouse Pangenome Reference 
