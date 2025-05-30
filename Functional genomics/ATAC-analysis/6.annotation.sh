@@ -1,0 +1,1 @@
+annotatePeaks.pl Peak_summits.extend ./HOMER/data/genomes/mm10 -annStats Peak_summits.anno >Peak_summits.anno.txt
