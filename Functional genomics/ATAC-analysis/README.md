@@ -18,8 +18,6 @@ This repository contains a modular pipeline for allele-specific ATAC-seq peak an
 
 - `vg`, `samtools`, `bedtools`
 - `MACS2`
-- `R` packages: `DESeq2`, `rGREAT`, `ChIPseeker`, `tidyverse`
-- Python 3.x with required libraries (for `2.spm.py`)
+- `R` packages: `DESeq2`, `rGREAT`,  `tidyverse`
 - Optional: `HOMER` for annotation
-
 
