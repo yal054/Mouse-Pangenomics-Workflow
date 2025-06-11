@@ -10,7 +10,9 @@ samtools faidx assembly.fna
 
 Next, RagTag (v2.1.0) was utilized to scaffold the assemblies, using GCF_000001635.26_GRCm38.p6_genomic.fna as the reference assembly:
 
+```
 ragtag.py scaffold -r GRCm39 contig_level_assembly.fna -o directory_out
+```
 
 The ragtag.scaffold.fasta files were then processed to adjust the FASTA header names using the following command:
 
@@ -51,7 +53,9 @@ Gap and sequence length analysis was performed on all RagTag-scaffolded and 75 C
 
 Example command:
 
+```
 python find_gaps.py input.fasta output_gaps.bed output_stats.txt
+```
 
 Outputs from the script include:
 
@@ -205,5 +209,3 @@ Assembly N50 values were taken from NCBI’s genome navigator:
 All assembly N50 numbers (contig and scaffold) as well as plots are archived here:
 
 - [N50 Data and Plots](https://wustl.app.box.com/folder/319167297524)
-
-
