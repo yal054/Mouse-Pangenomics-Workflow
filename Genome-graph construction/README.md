@@ -19,8 +19,8 @@ Template scripts and files used to create all graphs (DMP, CCP, LT x3, F1 x45) u
 - CCP graph uses the first 84 lines/assemblies from this file
 - LT graphs (3 total) each use the same list as the CCP graph, except for one pair from the following list per graph: CC004×CC017, CC015×CC040, CC027×CC036
 - F1 graphs (45 total) each contain mm10/GRCm38 and GRCm39, as well as a pair of RI or Founder assemblies:
-  - RI pairs: CC001×CC074, CC002×CC005, CC003×CC062, CC004×CC017, CC006×CC060, CC007×CC049, CC008×CC010, CC009×CC018, CC011×CC078, CC012×CC038, CC015×CC040, CC021×CC075, CC023×CC024, CC025×CC028, CC027×CC036, CC033×CC043, CC039×CC061, CC044×CC045, CC046×CC068, and CC057×CC058
-  - Founder pairs: 129S1_SvImJ×CAST_EiJ, NOD_ShiLtJ×WSB_EiJ, NZO_HlLtJ×NOD_ShiLtJ, PWK_PhJ×CAST_EiJ, and WSB_EiJ×CAST_EiJ
+  - RI pairs: `CC001×CC074, CC002×CC005, CC003×CC062, CC004×CC017, CC006×CC060, CC007×CC049, CC008×CC010, CC009×CC018, CC011×CC078, CC012×CC038, CC015×CC040, CC021×CC075, CC023×CC024, CC025×CC028, CC027×CC036, CC033×CC043, CC039×CC061, CC044×CC045, CC046×CC068, and CC057×CC058`
+  - Founder pairs: `129S1_SvImJ×CAST_EiJ, NOD_ShiLtJ×WSB_EiJ, NZO_HlLtJ×NOD_ShiLtJ, PWK_PhJ×CAST_EiJ, and WSB_EiJ×CAST_EiJ`
 
 `panacus.sh`: used to calculate graph statistics
 - `graph.full.gfa.gz`: the graph from which to generate statistics

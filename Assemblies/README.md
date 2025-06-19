@@ -1,5 +1,3 @@
 Genome assemblies of different mouse lines, and corresponding annotations.
 
-`./process_SM_LG.sh SM_Genome_v3.fa > renamed.SM_Genome_v3.fa`
-`./process_SM_LG.sh LG_Genome_v3.fa > renamed.LG_Genome_v3.fa`
-`./process_T2T.sh mouse.241018.v1.1.0.combined.fasta > renamed.mouse.241018.v1.1.0.combined.fasta`
+All `process_*` scripts were those used to process raw assemblies into the form used for graph building. Non-chromosomal sequences were removed, and names standardized to chr1-19, chrX, chrY (when applicable), and chrM.
