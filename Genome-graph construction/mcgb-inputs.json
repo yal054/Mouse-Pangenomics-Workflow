@@ -1,0 +1,10 @@
+{
+    "pangenome_mcgb.name": "DMP",
+    "pangenome_mcgb.ref": "GRCm39 mm10",
+    "pangenome_mcgb.seqfile": "DMP-seqfile.tsv",
+    "pangenome_mcgb.graph_types": ["clip", "full"],
+    "pangenome_mcgb.run_panacus": false,
+    "pangenome_mcgb.docker": "quay.io/comparative-genomics-toolkit/cactus:v2.9.3",
+    "pangenome_mcgb.cpu": 48,
+    "pangenome_mcgb.memory": 1600
+}
