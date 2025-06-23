@@ -4,13 +4,13 @@ The mouse, *Mus musculus*, serves as an important genetic model organism in biom
 
 - Manuscript structure
   - [Assemblies](Assemblies/README.md)
-  - [Variant analysis](Variant analysis/README.md)
-  - [Alignment benchmarking](Alignment benchmarking/README.md)
+  - [Variant analysis](Variant%20analysis/README.md)
+  - [Alignment benchmarking](Alignment%20benchmarking/README.md)
   - [Alignments](Alignments/README.md)
-  - [Reference bias](Reference bias/README.md)
-  - [Genome-graph construction](Genome-graph construction/README.md)
-  - [Personalized pangenome](Personalized pangenome/README.md)
-  - [Functional genomics](Functional genomics/README.md)
+  - [Reference bias](Reference%20bias/README.md)
+  - [Genome-graph construction](Genome-graph%20construction/README.md)
+  - [Personalized pangenome](Personalized%20pangenome/README.md)
+  - [Functional genomics](Functional%20genomics/README.md)
 
 
 
