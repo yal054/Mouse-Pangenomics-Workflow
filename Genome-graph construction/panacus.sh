@@ -1,3 +1,3 @@
-#!/bin/bash
+panacus hist $GRAPH.full.gfa.gz > $GRAPH.full.panacus-hist.tsv
 
-panacus hist graph.full.gfa.gz > graph.full.panacus-hist.tsv
+panacus hist $GRAPH.gfa.gz > $GRAPH.panacus-hist.tsv

@@ -1,0 +1,1 @@
+kmc -k29 -m16 -okff -t4 -hp @$INPUT_FASTQ_PATHS $OUTPUT_DIR $TMPDIR

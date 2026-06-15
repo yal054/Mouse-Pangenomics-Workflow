@@ -1,0 +1,2 @@
+bcftools view --types "snps,indels" -W=tbi -o type-filtered.biallelic-only.sorted.multi.sorted-normed-vcfwaved-Founders.vcf.gz biallelic-only.sorted.multi.sorted-normed-vcfwaved-Founders.vcf.gz
+bcftools filter -e 'ILEN<-50 | ILEN>50' -W=tbi -o len-filtered.type-filtered.biallelic-only.sorted.multi.sorted-normed-vcfwaved-Founders.vcf.gz type-filtered.biallelic-only.sorted.multi.sorted-normed-vcfwaved-Founders.vcf.gz
