@@ -1,0 +1,629 @@
+---
+title: "Visualize reference alignment bias (simulated reads)"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Reference_Bias/"))
+set.seed(0)
+
+require("ggplot2")
+require("cowplot")
+require("viridis")
+require("reshape2")
+require("dplyr")
+require("tidyverse")
+library(plotly)
+library(Rtsne)
+library(stringr)
+library(ggbeeswarm)
+
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+
+theme_set(theme_cowplot())
+```
+
+```{r make figure directory}
+# make figure directory
+if (!dir.exists("Figures")) {
+  dir.create("Figures")
+}
+```
+
+```{r import ecdf functions}
+# find all ecdf_*.rds files in the directory
+ecdf_files <- list.files(path = file.path(DATA_ROOT, "Reference_Bias/"), pattern = "ecdf_.*\\.rds", full.names = TRUE)
+
+# create a list to store the ecdf functions
+ecdf_list <- list()
+# loop through the files and read the ecdf functions
+for (file in ecdf_files) {
+  # extract the name of the file without the path and extension
+  file_name <- gsub("ecdf_|\\.rds", "", basename(file))
+  # read the ecdf function from the file
+  ecdf_list[[file_name]] <- readRDS(file)
+}
+
+# check the names of the ecdf functions
+ecdf_names <- names(ecdf_list)
+
+# remove ".parsed.bed" from the names
+ecdf_names <- gsub("\\.parsed\\.bed.gz", "", ecdf_names)
+
+# replace "true-dip.CC" with "CC"
+#ecdf_names <- gsub("true-dip.CC", "true-dip", ecdf_names)
+
+# parse name to get {Genome}.{Cross} split by "."
+Genome <- str_split(ecdf_names, "_", simplify = TRUE)[,1]
+Cross <- str_split(ecdf_names, "_", simplify = TRUE)[,2]
+```
+
+```{r process ecdf functions to generate dataframe}
+lapply(
+  1:length(ecdf_list),
+  function(I) data.frame(
+              referenceFraction=seq(0,1,0.01),
+              percentile=unlist(lapply(seq(0,1,0.01), function(X) ecdf_list[[I]](X))),
+              Genome=Genome[I],
+              Cross=Cross[I]
+            )
+) %>% bind_rows() -> ReferenceFraction_Percentile_Data
+
+
+ReferenceFraction_Percentile_Data$Genome <- gsub("Pangenome", "Pangenome", ReferenceFraction_Percentile_Data$Genome)
+ReferenceFraction_Percentile_Data$Genome <- gsub("BWA", "mm10", ReferenceFraction_Percentile_Data$Genome)
+
+# Correct the Cross names, replace "_" with "/"
+ReferenceFraction_Percentile_Data$Cross <- gsub("-", "x", ReferenceFraction_Percentile_Data$Cross)
+```
+
+```{r plot all ecdf functions curves, include=TRUE, fig.width=2.5, fig.height=5}
+ggplot(ReferenceFraction_Percentile_Data, aes(x=referenceFraction, y=percentile, color=Cross)) +
+  geom_line(linewidth=0.2) +
+  facet_grid(Genome~.) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "grey15") +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "grey15") +
+  JFMVTheme +
+  theme(legend.position = "none") +
+  labs(x="Reference fraction", y="Percentile") +
+  #scale_x_continuous(breaks = seq(0,1,0.1)) +
+  #scale_y_continuous(breaks = seq(0,1,0.1)) +
+  theme(
+    axis.text.x = element_text(size=10),
+    axis.text.y = element_text(size=10),
+    axis.title.x = element_text(size=12),
+    axis.title.y = element_text(size=12),
+    strip.text.x = element_text(size=12),
+    strip.text.y = element_text(size=12)
+  ) -> p1
+
+p1
+
+# save as png and as svg
+ggsave("Figures/ReferenceAlignmentBias_splitbyassembly_ECDFs.png", plot=p1, width=2.5, height=5, dpi=300)
+ggsave("Figures/ReferenceAlignmentBias_splitbyassembly_ECDFs.svg", plot=p1, width=2.5, height=5)
+```
+
+```{r calculate intervals per referenceFraction}
+lapply(
+  unique(ReferenceFraction_Percentile_Data$referenceFraction),
+  function(I) lapply(
+                unique(ReferenceFraction_Percentile_Data$Genome),
+                function(J) data.frame(
+                  referenceFraction=I,
+                  Genome=J,
+                  min=min(subset(ReferenceFraction_Percentile_Data, Genome==J & referenceFraction==I)$percentile),
+                  max=max(subset(ReferenceFraction_Percentile_Data, Genome==J & referenceFraction==I)$percentile),
+                  mean=mean(subset(ReferenceFraction_Percentile_Data, Genome==J & referenceFraction==I)$percentile),
+                  median=median(subset(ReferenceFraction_Percentile_Data, Genome==J & referenceFraction==I)$percentile),
+                  sd=sd(subset(ReferenceFraction_Percentile_Data, Genome==J & referenceFraction==I)$percentile)
+                  )
+                )
+      ) %>% bind_rows() -> ReferenceFraction_Percentile_Intervals
+```
+
+```{r plot intervals, include=TRUE, fig.width=2.5, fig.height=2.25}
+ggplot(ReferenceFraction_Percentile_Intervals, aes(x=referenceFraction, y=mean, fill=Genome)) +
+  geom_vline(xintercept = 0.6, linetype = "dashed", color = "grey15", linewidth=0.5) +
+  geom_hline(yintercept = 0.5, linetype = "solid", color = "grey25", linewidth=0.5) +
+  geom_vline(xintercept = 0.5, linetype = "solid", color = "grey25", linewidth=0.5) +
+  geom_ribbon(aes(ymin=min, ymax=max), alpha=0.65) +
+  scale_x_continuous(expand=c(0,0), limits=c(0,1), breaks=seq(0,1,0.2)) +
+  scale_y_continuous(expand=c(0,0), limits=c(0,1), breaks=seq(0,1,0.2)) +
+  JFMVTheme +
+  theme(legend.position = "none") +
+  labs(x="Reference fraction", y="Cumulative Fraction") +
+  scale_fill_manual(values = c("#c03a46", "#447ead")) -> p2
+
+p2
+
+# save as png and as svg
+ggsave("Figures/ReferenceAlignmentBias_CumulativeFraction.png", plot=p2, width=2.5, height=2.25, dpi=300)
+ggsave("Figures/ReferenceAlignmentBias_CumulativeFraction.svg", plot=p2, width=2.5, height=2.25)
+```
+
+```{r calculate referencebias as percentile differences}
+calculate_percentile_difference <- function(REFERENCEFRACTION, GENOME, CROSS) {
+  
+  subset(
+    ReferenceFraction_Percentile_Data,
+    Genome == GENOME &
+      Cross == CROSS &
+      referenceFraction == REFERENCEFRACTION
+  )$percentile -> PERCENT
+  
+  1 - PERCENT
+}
+
+REFERENCEFRACTIONS <- sprintf("%.1f", seq(0.5, 0.95, by = 0.05))
+
+# Loop through the unique values of Cross, Genome, and referenceFraction
+percentile_differences <- lapply(
+  unique(ReferenceFraction_Percentile_Data$Cross),
+  function(CROSS) {
+    lapply(
+      unique(ReferenceFraction_Percentile_Data$Genome),
+      function(GENOME) {
+        lapply(
+          REFERENCEFRACTIONS,
+          function(REFERENCEFRACTION) {
+            data.frame(
+              Cross = CROSS,
+              Genome = GENOME,
+              referenceFraction = REFERENCEFRACTION,
+              ReferenceBias = calculate_percentile_difference(REFERENCEFRACTION, GENOME, CROSS)
+            )
+          }
+        ) %>% bind_rows()
+      }
+    ) %>% bind_rows()
+  }
+) %>% bind_rows()
+```
+
+```{r plot reference bias by reference fraction, include=TRUE, fig.width=4, fig.height=4}
+percentile_differences$referenceFraction_plot <- factor(
+  percentile_differences$referenceFraction,
+  levels = sprintf("%.1f", seq(0.1, 0.9, by = 0.1))
+)
+
+ggplot(
+  percentile_differences,
+  aes(x = referenceFraction_plot, y = ReferenceBias, color = Genome)
+) +
+  geom_violin(
+    aes(group = interaction(referenceFraction_plot, Genome)),
+    trim = TRUE,
+    scale = "width",
+    alpha = 0.65,
+    position = position_dodge(width = 0.8)
+  ) +
+  ggbeeswarm::geom_quasirandom(
+    aes(group = interaction(referenceFraction_plot, Genome)),
+    size = 0.5,
+    stroke = 0,
+    color = "black",
+    width = 0.15,
+    dodge.width = 0.8
+  ) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  ) +
+  labs(
+    x = "Reference fraction",
+    y = "Fraction of sites\nwith reference bias"
+  ) +
+  scale_color_manual(values = c("#c03a46", "#447ead")) -> p3
+
+p3
+```
+
+```{r summarize ReferenceBias by Cross and Genome}
+percentile_differences %>%
+  group_by(Genome, referenceFraction) %>%
+  summarise(
+    meanBiasedFraction = mean(ReferenceBias),
+    sdBiasedFraction = sd(ReferenceBias),
+    .groups = "drop"
+  )
+```
+
+```{r summarize ReferenceBias counts by Cross, Genome, and referenceFraction}
+library(data.table)
+fread("Merged_Parsed_VCFs/reference_fraction_threshold_counts.tsv") -> reference_fraction_threshold_counts
+
+reference_fraction_threshold_counts %>%
+  group_by(Genome, referenceFraction) %>%
+  summarise(
+    meanBiasedCount = mean(n_sites_above_threshold),
+    sdBiasedCount = sd(n_sites_above_threshold),
+    .groups = "drop"
+  )
+```
+
+```{r plot reference bias counts by reference fraction, include=TRUE, fig.width=4, fig.height=4}
+subset(reference_fraction_threshold_counts, referenceFraction>=0.5 ) -> reference_fraction_threshold_counts
+
+reference_fraction_threshold_counts$referenceFraction_plot <- factor(
+  reference_fraction_threshold_counts$referenceFraction,
+  levels = seq(0.5, 0.9, by = 0.1)
+)
+
+
+
+ggplot(
+  reference_fraction_threshold_counts,
+  aes(x = referenceFraction_plot, y = n_sites_above_threshold/1e6, color = Genome)
+) +
+  geom_violin(
+    aes(group = interaction(referenceFraction_plot, Genome)),
+    trim = TRUE,
+    scale = "width",
+    alpha = 0.65,
+    position = position_dodge(width = 0.8)
+  ) +
+  ggbeeswarm::geom_quasirandom(
+    aes(group = interaction(referenceFraction_plot, Genome)),
+    size = 1.25,
+    stroke = 0,
+    color = "black",
+    width = 0.15,
+    dodge.width = 0.8
+  ) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  ) +
+  labs(
+    x = "Reference fraction threshold",
+    y = "Sites above threshold (millions)"
+  ) +
+  scale_color_manual(values = c("#c03a46", "#447ead")) -> p3b
+
+p3b
+
+# save as png and as svg
+ggsave("Figures/ReferenceAlignmentBias_SitesAboveThreshold.png", plot=p3b, width=4, height=4, dpi=300)
+ggsave("Figures/ReferenceAlignmentBias_SitesAboveThreshold.svg", plot=p3b, width=4, height=4)
+```
+
+```{r per-F1 fold reduction across thresholds}
+# Reshape wide: one row per (file, threshold) with BWA and Pangenome side by side
+threshold_wide <- dcast(
+    setDT(reference_fraction_threshold_counts),
+    file + referenceFraction ~ Genome,
+    value.var = "n_sites_above_threshold"
+)
+
+# Per-F1 ratio
+threshold_wide[, ratio := BWA / Pangenome]
+
+# Median across the 20 F1 pairs at each threshold
+threshold_wide[
+    ,
+    .(n_F1 = .N,
+      median_BWA   = median(BWA),
+      median_Pan   = median(Pangenome),
+      median_ratio = median(ratio),
+      mean_ratio   = mean(ratio),
+      sd_ratio     = sd(ratio)),
+    by = referenceFraction
+][order(referenceFraction)]
+```
+
+```{r perform paired Wilcoxon test comparing mm10 and Pangenome reference bias}
+percentile_differences_for_test <- percentile_differences %>%
+  group_by(Cross, Genome, referenceFraction) %>%
+  summarise(
+    ReferenceBias = mean(ReferenceBias),
+    .groups = "drop"
+  )
+
+percentile_differences_wide <- percentile_differences_for_test %>%
+  dplyr::select(Cross, Genome, referenceFraction, ReferenceBias) %>%
+  pivot_wider(
+    names_from = Genome,
+    values_from = ReferenceBias
+  )
+
+percentile_differences_wide$d <- percentile_differences_wide$mm10 -
+  percentile_differences_wide$Pangenome
+
+wilcox_results <- percentile_differences_wide %>%
+  group_by(referenceFraction) %>%
+  summarise(
+    n = sum(!is.na(mm10) & !is.na(Pangenome)),
+    meanDifference = mean(d, na.rm = TRUE),
+    sdDifference = sd(d, na.rm = TRUE),
+    medianDifference = median(d, na.rm = TRUE),
+    p_value = wilcox.test(
+      mm10,
+      Pangenome,
+      paired = TRUE,
+      exact = TRUE,
+      alternative = "two.sided"
+    )$p.value,
+    .groups = "drop"
+  )
+
+wilcox_results$padj_BH <- p.adjust(wilcox_results$p_value, method = "BH")
+
+wilcox_results
+```
+
+```{r plot reference bias, include=TRUE, fig.width=2.75, fig.height=2.25}
+# ggplot(percentile_differences, aes(x=Genome, y=ReferenceBias, fill=Genome, color=Genome)) +
+#   geom_violin(trim=TRUE, scale="width", alpha=0.65) +
+#   geom_beeswarm(size=1, stroke=0, color="black", cex=2) +
+#   JFMVTheme +
+#   theme(legend.position = "none") +
+#   labs(x="Cross", y="Fraction of sites\nwith reference bias") +
+#   scale_fill_manual(values = c("#c03a46", "#447ead")) +
+#   scale_y_continuous(expand=c(0,0), limits=c(0,0.15)) -> p3
+# 
+# p3
+p3
+
+# save as png and as svg
+ggsave("Figures/Fraction_sites_with_RefFraction_AboveThreshold.png", plot=p3, width=2.75, height=2.25, dpi=300)
+ggsave("Figures/Fraction_sites_with_RefFraction_AboveThreshold.svg", plot=p3, width=2.75, height=2.25)
+```
+
+```{r calculate delta cumulative fraction}
+# for each cross, calculate the difference in cumulative fraction (for each reference fraction interval) comparing only CC to mm10
+# don't loop through all unique Genome, just CC compared to mm10
+lapply(
+  unique(ReferenceFraction_Percentile_Data$referenceFraction),
+  function(I) lapply(
+    unique(ReferenceFraction_Percentile_Data$Cross),
+    function(J) data.frame(
+      referenceFraction=I,
+      Cross=J,
+      deltaCumulativeFraction=(subset(ReferenceFraction_Percentile_Intervals, Genome=="Pangenome" & referenceFraction==I)$mean - subset(ReferenceFraction_Percentile_Intervals, Genome=="mm10" & referenceFraction==I)$mean)
+    )
+  )
+) %>% bind_rows() -> ReferenceFraction_Delta_Cumulative_Fraction
+
+# add the two dataframes together
+ReferenceFraction_Delta_Cumulative_Fraction$Genome <- "mm10"
+```
+
+```{r plot delta cumulative fraction, include=TRUE, fig.width=2.75, fig.height=2.25}
+ggplot(ReferenceFraction_Delta_Cumulative_Fraction, aes(x=referenceFraction, y=deltaCumulativeFraction, fill=Genome)) +
+  geom_vline(xintercept = 0.7, linetype = "dashed", color = "grey15", linewidth=0.5) +
+  geom_vline(xintercept = 0.5, linetype = "solid", color = "grey25", linewidth=0.5) +
+  geom_hline(yintercept = 0, linetype = "solid", color = "grey25", linewidth=0.5) +
+  geom_ribbon(aes(ymin=0, ymax=deltaCumulativeFraction), alpha=0.65) +
+  scale_x_continuous(expand=c(0,0), limits=c(0,1), breaks=seq(0,1,0.2)) +
+  JFMVTheme +
+  theme(legend.position = "none") +
+  labs(x="Reference fraction", y="Delta Cumulative\nFraction") +
+  scale_fill_manual(values = c("#c03a46", "#447ead")) -> p5
+
+p5
+
+# Save as png and as svg
+ggsave("Figures/ReferenceAlignmentBias_DeltaCumulativeFraction.png", plot=p5, width=2.75, height=2.25, dpi=300)
+ggsave("Figures/ReferenceAlignmentBias_DeltaCumulativeFraction.svg", plot=p5, width=2.75, height=2.25)
+```
+
+
+```{r perform paired exact randomization test ecdf}
+
+# Exact paired randomization test.
+# For each Cross, either keep the observed Pangenome - mm10 ECDF difference
+# or flip its sign. This enumerates all 2^n paired label swaps.
+
+spread(ReferenceFraction_Percentile_Data, referenceFraction, percentile) -> DATA.wide
+
+referenceFraction_columns <- setdiff(colnames(DATA.wide), c("Genome", "Cross"))
+referenceFraction_columns <- referenceFraction_columns[order(as.numeric(referenceFraction_columns))]
+
+Crosses <- unique(DATA.wide$Cross)
+
+lapply(
+  Crosses,
+  function(CROSS) {
+    
+    Pangenome_Row <- subset(DATA.wide, Cross == CROSS & Genome == "Pangenome")
+    mm10_Row <- subset(DATA.wide, Cross == CROSS & Genome == "mm10")
+    
+    if (nrow(Pangenome_Row) != 1 | nrow(mm10_Row) != 1) {
+      stop(paste0("Expected exactly one Pangenome row and one mm10 row for Cross: ", CROSS))
+    }
+    
+    as.numeric(unlist(Pangenome_Row[, referenceFraction_columns])) -
+      as.numeric(unlist(mm10_Row[, referenceFraction_columns]))
+  }
+) %>% do.call(rbind, .) -> Difference_Matrix
+
+n_pairs <- nrow(Difference_Matrix)
+
+max_mm10 <- max(abs(colMeans(Difference_Matrix)))
+
+NumberOfIterations <- 2^n_pairs
+print(NumberOfIterations)
+
+chunk_size <- 50000
+n_chunks <- ceiling(NumberOfIterations / chunk_size)
+
+Randomization_Results <- vector("list", n_chunks)
+extreme_count <- 0
+tolerance <- sqrt(.Machine$double.eps)
+
+for (chunk in seq_len(n_chunks)) {
+  
+  start_index <- (chunk - 1) * chunk_size
+  end_index <- min(chunk * chunk_size - 1, NumberOfIterations - 1)
+  ids <- start_index:end_index
+  
+  signs <- sapply(
+    seq_len(n_pairs),
+    function(BIT) {
+      ifelse(bitwAnd(ids, bitwShiftL(1L, BIT - 1L)) == 0, -1, 1)
+    }
+  )
+  
+  permuted_delta <- signs %*% Difference_Matrix / n_pairs
+  permuted_max <- apply(abs(permuted_delta), 1, max)
+  
+  extreme_count <- extreme_count + sum(permuted_max >= (max_mm10 - tolerance))
+  
+  Randomization_Results[[chunk]] <- data.frame(
+    iteration = ids + 1,
+    max_mm10 = permuted_max
+  )
+}
+
+Randomization_Results <- bind_rows(Randomization_Results)
+
+p_value_mm10 <- extreme_count / NumberOfIterations
+
+print(paste0("exact paired randomization p-value mm10: ", p_value_mm10))
+
+```
+
+```{r estimate significance of max delta cumulative fraction, include=TRUE, fig.width=2.5, fig.height=2.25}
+max( abs(subset(ReferenceFraction_Delta_Cumulative_Fraction, Genome=="mm10")$deltaCumulativeFraction) )->max_mm10
+
+p_value_mm10 <- mean(Randomization_Results$max_mm10 >= (max_mm10 - sqrt(.Machine$double.eps)))
+
+print(paste0("p-value mm10: ", p_value_mm10))
+
+ggplot(Randomization_Results, aes(x=max_mm10)) +
+  geom_histogram(fill="grey", alpha=0.5) +
+  geom_vline(xintercept = max_mm10, linetype = "dashed", color = "#c03a46", linewidth=0.5) +
+  JFMVTheme +
+  labs(x="ks-statistic", y="Count") +
+  scale_x_continuous(expand=c(0,0), limits=c(0,max(Randomization_Results$max_mm10, max_mm10)*1.1)) +
+  scale_y_continuous(expand=c(0,0), limits=c(0, 100)) +
+  annotate("text", x=max(Randomization_Results$max_mm10, max_mm10)*.75, y=90, label=paste0("p-value: ", round(p_value_mm10, 4)), color="#c03a46", size=3.5) -> p6
+
+
+p6
+
+# save as png and as svg
+ggsave("Figures/RandomizationTest_CC_vs_mm10.png", plot=p6, width=2.5, height=2.25, dpi=300)
+ggsave("Figures/RandomizationTest_CC_vs_mm10.svg", plot=p6, width=2.5, height=2.25)
+```
+
+```{r import epdf functions}
+# find all epdf_*.bed files in the directory
+epdf_files <- list.files(path = file.path(DATA_ROOT, "Reference_Bias/"), pattern = "epdf_.*\\.bed", full.names = TRUE)
+
+# create a list to store the epdf functions
+epdf_list <- list()
+# loop through the files and read the epdf functions
+for (file in epdf_files) {
+  # extract the name of the file without the path and extension
+  file_name <- gsub("epdf_|\\.rds", "", basename(file))
+  # read the epdf function from the file
+  epdf_list[[file_name]] <- readRDS(file)
+}
+
+# check the names of the ecdf functions
+epdf_names <- names(epdf_list)
+
+# remove ".parsed.bed" from the names
+epdf_names <- gsub("\\.parsed\\.bed\\.gz", "", epdf_names)
+
+# parse name to get {Genome}.{Cross} split by "."
+Genome <- str_split(epdf_names, "_", simplify = TRUE)[,1]
+Cross <- str_split(epdf_names, "_", simplify = TRUE)[,2]
+```
+
+```{r process epdf functions to generate dataframe}
+lapply(
+  1:length(epdf_files),
+  function(I) data.frame(
+              referenceFraction=seq(0,0.99,0.01),
+              percentile=unlist(lapply(seq(0,0.99,0.01), function(X) integrate(epdf_list[[I]], lower = X, upper = X+0.01)[[1]] )),
+              Genome=Genome[I],
+              Cross=Cross[I]
+            )
+) %>% bind_rows() -> ReferenceFraction_Percentile_Data
+
+ReferenceFraction_Percentile_Data$Genome <- gsub("Pangenome", "Pangenome", ReferenceFraction_Percentile_Data$Genome)
+ReferenceFraction_Percentile_Data$Genome <- gsub("BWA", "mm10", ReferenceFraction_Percentile_Data$Genome)
+```
+
+```{r plot all epdf functions curves, include=TRUE, fig.width=2.5, fig.height=5}
+
+ggplot(ReferenceFraction_Percentile_Data, aes(x=referenceFraction, y=percentile, color=Cross)) +
+  geom_line(linewidth=0.2) +
+  facet_grid(Genome~.) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "grey15") +
+  JFMVTheme +
+  theme(legend.position = "none") +
+  labs(x="Reference fraction", y="Probability") +
+  scale_y_continuous(breaks = seq(0,0.06,0.01)) +
+  theme(
+    axis.text.x = element_text(size=10),
+    axis.text.y = element_text(size=10),
+    axis.title.x = element_text(size=12),
+    axis.title.y = element_text(size=12),
+    strip.text.x = element_text(size=12),
+    strip.text.y = element_text(size=12)
+  ) -> p8
+
+p8
+
+# save as png and as svg
+ggsave("Figures/ReferenceAlignmentBias_splitbyassembly_EPDFs.png", plot=p8, width=2.5, height=5, dpi=300)
+
+```
+
+```{r calculate intervals per referenceFraction epdf}
+lapply(
+  unique(ReferenceFraction_Percentile_Data$referenceFraction),
+  function(I) lapply(
+                unique(ReferenceFraction_Percentile_Data$Genome),
+                function(J) data.frame(
+                  referenceFraction=I,
+                  Genome=J,
+                  min=min(subset(ReferenceFraction_Percentile_Data, Genome==J & referenceFraction==I)$percentile),
+                  max=max(subset(ReferenceFraction_Percentile_Data, Genome==J & referenceFraction==I)$percentile),
+                  mean=mean(subset(ReferenceFraction_Percentile_Data, Genome==J & referenceFraction==I)$percentile),
+                  median=median(subset(ReferenceFraction_Percentile_Data, Genome==J & referenceFraction==I)$percentile),
+                  sd=sd(subset(ReferenceFraction_Percentile_Data, Genome==J & referenceFraction==I)$percentile)
+                  )
+                )
+      ) %>% bind_rows() -> ReferenceFraction_Percentile_Intervals
+```
+
+```{r plot intervals epdf, include=TRUE, fig.width=2.5, fig.height=2.25}
+ggplot(ReferenceFraction_Percentile_Intervals, aes(x=referenceFraction, y=mean, fill=Genome)) +
+  geom_vline(xintercept = 0.6, linetype = "dashed", color = "grey15", linewidth=0.5) +
+  geom_vline(xintercept = 0.5, linetype = "solid", color = "grey25", linewidth=0.5) +
+  geom_ribbon(aes(ymin=min, ymax=max), alpha=1) +
+  scale_x_continuous(expand=c(0,0), limits=c(0,1), breaks=seq(0,1,0.2)) +
+  scale_y_continuous(expand=c(0,0), limits=c(0,0.06), breaks=seq(0,0.06,0.01)) +
+  JFMVTheme +
+  theme(legend.position = "none") +
+  labs(x="Reference fraction", y="Probability") +
+  scale_fill_manual(values = c("#c03a46", "#447ead")) -> p9
+
+p9
+
+# save as png and as svg
+ggsave("Figures/ReferenceAlignmentBias_EPDFs.png", plot=p9, width=2.5, height=5, dpi=300)
+```

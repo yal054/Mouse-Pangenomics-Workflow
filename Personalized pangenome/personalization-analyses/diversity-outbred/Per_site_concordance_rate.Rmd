@@ -1,0 +1,999 @@
+---
+title: "Visualize DO concordance"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+set.seed(0)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "DO_Personalizaiton/"))
+
+library(ggplot2)
+library(cowplot)
+library(scales)
+library(dplyr)
+library(factoextra)
+library(tidyr)
+source(file.path(REPO_ROOT, "shared-R", "CS_Aesthetic.R"))
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+library(ggrepel)
+library(gridExtra)
+library(reshape2)
+```
+
+```{r load data summary}
+library(data.table)
+
+fread("Per_site_concordance_rate/pairwise_allele_shared_fraction_summary_table.tsv") -> pairwise_allele_shared_fraction_summary_table
+
+# parse "comparison" column by _ to get sample1 and sample2
+pairwise_allele_shared_fraction_summary_table$comparison %>%
+  strsplit(split = "_") %>%
+  sapply(function(x) x[5]) -> pairwise_allele_shared_fraction_summary_table$sample1.SRA
+
+pairwise_allele_shared_fraction_summary_table$comparison %>%
+  strsplit(split = "_") %>%
+  sapply(function(x) x[7]) -> pairwise_allele_shared_fraction_summary_table$sample2.SRA
+
+fread("Null_lc_hc_Per_site_concordance_rate/pairwise_allele_shared_fraction_null_lc_hc_summary_table.tsv") -> pairwise_allele_shared_fraction_null_lc_hc_summary_table
+
+# parse "comparison" column by _ to get sample1 and sample2
+pairwise_allele_shared_fraction_null_lc_hc_summary_table$comparison %>%
+  strsplit(split = "_") %>%
+  sapply(function(x) x[8]) -> pairwise_allele_shared_fraction_null_lc_hc_summary_table$sample1.SRA
+
+pairwise_allele_shared_fraction_null_lc_hc_summary_table$comparison %>%
+  strsplit(split = "_") %>%
+  sapply(function(x) x[10]) -> pairwise_allele_shared_fraction_null_lc_hc_summary_table$sample2.SRA
+
+fread("Null_hc_hc_Per_site_concordance_rate/pairwise_allele_shared_fraction_null_hc_hc_summary_table.tsv") -> pairwise_allele_shared_fraction_null_hc_hc_summary_table
+
+# parse "comparison" column by _ to get sample1 and sample2
+pairwise_allele_shared_fraction_null_hc_hc_summary_table$comparison %>%
+  strsplit(split = "_") %>%
+  sapply(function(x) x[8]) -> pairwise_allele_shared_fraction_null_hc_hc_summary_table$sample1.SRA
+
+pairwise_allele_shared_fraction_null_hc_hc_summary_table$comparison %>%
+  strsplit(split = "_") %>%
+  sapply(function(x) x[10]) -> pairwise_allele_shared_fraction_null_hc_hc_summary_table$sample2.SRA
+
+fread("Null_lc_lc_Per_site_concordance_rate/pairwise_allele_shared_fraction_null_lc_lc_summary_table.tsv") -> pairwise_allele_shared_fraction_null_lc_lc_summary_table
+
+# parse "comparison" column by _ to get sample1 and sample2
+pairwise_allele_shared_fraction_null_lc_lc_summary_table$comparison %>%
+  strsplit(split = "_") %>%
+  sapply(function(x) x[8]) -> pairwise_allele_shared_fraction_null_lc_lc_summary_table$sample1.SRA
+
+pairwise_allele_shared_fraction_null_lc_lc_summary_table$comparison %>%
+  strsplit(split = "_") %>%
+  sapply(function(x) x[10]) -> pairwise_allele_shared_fraction_null_lc_lc_summary_table$sample2.SRA
+```
+
+```{r import SraRunTable}
+library(dplyr)
+fread("lcWGS_SraRunTable.csv") -> lcWGS_SraRunTable
+fread("hcWGS_SraRunTable.csv") -> hcWGS_SraRunTable
+
+colnames(lcWGS_SraRunTable)[31]<-"Sample_Name"
+colnames(hcWGS_SraRunTable)[31]<-"Sample_Name"
+
+# combine
+lcWGS_SraRunTable <- lcWGS_SraRunTable %>%
+  dplyr::select(Sample_Name, Run, Bases) %>%
+  dplyr::rename(Sample = Sample_Name)
+
+hcWGS_SraRunTable %>%
+  dplyr::select(Sample_Name, Run, Bases) %>%
+  dplyr::rename(Sample = Sample_Name) -> hcWGS_SraRunTable
+
+rbind(lcWGS_SraRunTable, hcWGS_SraRunTable) -> combined_SraRunTable
+
+# add SRA info to pairwise_allele_shared_fraction_summary_table
+pairwise_allele_shared_fraction_summary_table %>%
+  dplyr::left_join(combined_SraRunTable, by = c("sample1.SRA" = "Run")) %>%
+  dplyr::rename(sample1.Bases = Bases) -> pairwise_allele_shared_fraction_summary_table
+
+pairwise_allele_shared_fraction_summary_table %>%
+  dplyr::left_join(combined_SraRunTable[,c(2:3)], by = c("sample2.SRA" = "Run")) %>%
+  dplyr::rename(sample2.Bases = Bases) -> pairwise_allele_shared_fraction_summary_table
+
+# add SRA info to pairwise_allele_shared_fraction_null_lc_hc_summary_table
+pairwise_allele_shared_fraction_null_lc_hc_summary_table %>%
+  dplyr::left_join(combined_SraRunTable, by = c("sample1.SRA" = "Run")) %>%
+  dplyr::rename(sample1.Bases = Bases) -> pairwise_allele_shared_fraction_null_lc_hc_summary_table
+
+pairwise_allele_shared_fraction_null_lc_hc_summary_table %>%
+  dplyr::left_join(combined_SraRunTable[,c(2:3)], by = c("sample2.SRA" = "Run")) %>%
+  dplyr::rename(sample2.Bases = Bases) -> pairwise_allele_shared_fraction_null_lc_hc_summary_table
+
+# add SRA info to pairwise_allele_shared_fraction_null_hc_hc_summary_table
+pairwise_allele_shared_fraction_null_hc_hc_summary_table %>%
+  dplyr::left_join(combined_SraRunTable, by = c("sample1.SRA" = "Run")) %>%
+  dplyr::rename(sample1.Bases = Bases) -> pairwise_allele_shared_fraction_null_hc_hc_summary_table
+
+pairwise_allele_shared_fraction_null_hc_hc_summary_table %>%
+  dplyr::left_join(combined_SraRunTable[,c(2:3)], by = c("sample2.SRA" = "Run")) %>%
+  dplyr::rename(sample2.Bases = Bases) -> pairwise_allele_shared_fraction_null_hc_hc_summary_table
+
+# add SRA info to pairwise_allele_shared_fraction_null_lc_lc_summary_table
+pairwise_allele_shared_fraction_null_lc_lc_summary_table %>%
+  dplyr::left_join(combined_SraRunTable, by = c("sample1.SRA" = "Run")) %>%
+  dplyr::rename(sample1.Bases = Bases) -> pairwise_allele_shared_fraction_null_lc_lc_summary_table
+
+# add group column
+pairwise_allele_shared_fraction_summary_table$group <- "Real pairs"
+pairwise_allele_shared_fraction_null_lc_hc_summary_table$group <- "Null lc:hc pairs"
+pairwise_allele_shared_fraction_null_hc_hc_summary_table$group <- "Null hc:hc pairs"
+pairwise_allele_shared_fraction_null_lc_lc_summary_table$group <- "Null lc:lc pairs"
+```
+
+
+```{r check in pairs match}
+# make pair key by pasting sample1.SRA and sample2.SRA together
+pairwise_allele_shared_fraction_summary_table$pair_key <- paste(pairwise_allele_shared_fraction_summary_table$sample1.SRA, pairwise_allele_shared_fraction_summary_table$sample2.SRA, sep = "_vs_")
+
+pairwise_allele_shared_fraction_null_lc_hc_summary_table$pair_key <- paste(pairwise_allele_shared_fraction_null_lc_hc_summary_table$sample1.SRA, pairwise_allele_shared_fraction_null_lc_hc_summary_table$sample2.SRA, sep = "_vs_")
+
+pairwise_allele_shared_fraction_null_hc_hc_summary_table$pair_key <- paste(pairwise_allele_shared_fraction_null_hc_hc_summary_table$sample1.SRA, pairwise_allele_shared_fraction_null_hc_hc_summary_table$sample2.SRA, sep = "_vs_")
+
+pairwise_allele_shared_fraction_null_lc_lc_summary_table$pair_key <- paste(pairwise_allele_shared_fraction_null_lc_lc_summary_table$sample1.SRA, pairwise_allele_shared_fraction_null_lc_lc_summary_table$sample2.SRA, sep = "_vs_")
+
+# check if any pair keys in pairwise_allele_shared_fraction_summary_table are in pairwise_allele_shared_fraction_null_lc_hc_summary_table
+sum(pairwise_allele_shared_fraction_summary_table$pair_key %in% pairwise_allele_shared_fraction_null_lc_hc_summary_table$pair_key)
+sum(pairwise_allele_shared_fraction_summary_table$pair_key %in% pairwise_allele_shared_fraction_null_hc_hc_summary_table$pair_key)
+sum(pairwise_allele_shared_fraction_summary_table$pair_key %in% pairwise_allele_shared_fraction_null_lc_lc_summary_table$pair_key)
+
+# looks like one pair is in both tables, this should be removed from null lc:hc table
+#subset(pairwise_allele_shared_fraction_null_lc_hc_summary_table, !(pair_key %in% pairwise_allele_shared_fraction_summary_table$pair_key)) -> pairwise_allele_shared_fraction_null_lc_hc_summary_table
+```
+
+```{r plot stacked bar plot of count of sites with different allele shared fractions, fig.width=4, fig.height=4}
+# make wide to long for count_0, count_0.5, count_1
+pairwise_allele_shared_fraction_summary_table %>%
+  pivot_longer(cols = c(count_0, count_0.5, count_1), names_to = "allele_shared_fraction", values_to = "count") -> pairwise_allele_shared_fraction_summary_table_long
+
+pairwise_allele_shared_fraction_null_lc_hc_summary_table %>%
+  pivot_longer(cols = c(count_0, count_0.5, count_1), names_to = "allele_shared_fraction", values_to = "count") -> pairwise_allele_shared_fraction_null_lc_hc_summary_table_long
+
+pairwise_allele_shared_fraction_null_hc_hc_summary_table %>%
+  pivot_longer(cols = c(count_0, count_0.5, count_1), names_to = "allele_shared_fraction", values_to = "count") -> pairwise_allele_shared_fraction_null_hc_hc_summary_table_long
+
+pairwise_allele_shared_fraction_null_lc_lc_summary_table %>%
+  pivot_longer(cols = c(count_0, count_0.5, count_1), names_to = "allele_shared_fraction", values_to = "count") -> pairwise_allele_shared_fraction_null_lc_lc_summary_table_long
+
+# replace count_0 with "0", count_0.5 with "0.5", count_1 with "1"
+pairwise_allele_shared_fraction_summary_table_long$allele_shared_fraction <- gsub("count_", "", pairwise_allele_shared_fraction_summary_table_long$allele_shared_fraction)
+
+pairwise_allele_shared_fraction_null_lc_hc_summary_table_long$allele_shared_fraction <- gsub("count_", "", pairwise_allele_shared_fraction_null_lc_hc_summary_table_long$allele_shared_fraction)
+
+pairwise_allele_shared_fraction_null_hc_hc_summary_table_long$allele_shared_fraction <- gsub("count_", "", pairwise_allele_shared_fraction_null_hc_hc_summary_table_long$allele_shared_fraction)
+
+pairwise_allele_shared_fraction_null_lc_lc_summary_table_long$allele_shared_fraction <- gsub("count_", "", pairwise_allele_shared_fraction_null_lc_lc_summary_table_long$allele_shared_fraction)
+
+# plot count as stacked bar plot with x as comparison and fill as allele_shared_fraction
+ggplot(pairwise_allele_shared_fraction_summary_table_long, aes(x = Sample, y = count/1e6, fill = allele_shared_fraction)) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis_d(name = "Allele shared\nfraction", labels = c("0", "0.5", "1"), option = "cividis", begin=0.9, end=0.1) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_x_discrete(name = "Animal", expand = c(0,0)) +
+  scale_y_continuous(name = "Count (millions)", expand = c(0,0)) +
+  ggtitle("Real pairs")
+
+ggplot(pairwise_allele_shared_fraction_null_lc_hc_summary_table_long, aes(x = comparison, y = count/1e6, fill = allele_shared_fraction)) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis_d(name = "Allele shared\nfraction", labels = c("0", "0.5", "1"), option = "cividis", begin=0.9, end=0.1) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.text.x = element_blank()) +
+  scale_x_discrete(name = "Animal", expand = c(0,0)) +
+  scale_y_continuous(name = "Count (millions)", expand = c(0,0)) +
+  ggtitle("Null lc:hc pairs")
+
+ggplot(pairwise_allele_shared_fraction_null_hc_hc_summary_table_long, aes(x = comparison, y = count/1e6, fill = allele_shared_fraction)) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis_d(name = "Allele shared\nfraction", labels = c("0", "0.5", "1"), option = "cividis", begin=0.9, end=0.1) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.text.x = element_blank()) +
+  scale_x_discrete(name = "Animal", expand = c(0,0)) +
+  scale_y_continuous(name = "Count (millions)", expand = c(0,0)) +
+  ggtitle("Null hc:hc pairs")
+
+ggplot(pairwise_allele_shared_fraction_null_lc_lc_summary_table_long, aes(x = comparison, y = count/1e6, fill = allele_shared_fraction)) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis_d(name = "Allele shared\nfraction", labels = c("0", "0.5", "1"), option = "cividis", begin=0.9, end=0.1) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.text.x = element_blank()) +
+  scale_x_discrete(name = "Animal", expand = c(0,0)) +
+  scale_y_continuous(name = "Count (millions)", expand = c(0,0)) +
+  ggtitle("Null lc:lc pairs")
+```
+
+```{r plot null pairwise_allele_shared_fraction_null_lc_hc_summary_table, fig.width=4, fig.height=4}
+# qqlplot to compare genome_wide_fraction_alleles_shared for real pairs vs null lc:hc pairs
+ggplot(pairwise_allele_shared_fraction_summary_table, aes(sample = genome_wide_fraction_alleles_shared)) +
+  geom_qq() +
+  geom_qq_line() +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  ggtitle("Real pairs") +
+  xlab("Theoretical quantiles") +
+  ylab("Sample quantiles")
+
+# qqplot for null lc:hc pairs
+ggplot(pairwise_allele_shared_fraction_null_lc_hc_summary_table, aes(sample = genome_wide_fraction_alleles_shared)) +
+  geom_qq() +
+  geom_qq_line() +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  ggtitle("Null lc:hc pairs") +
+  xlab("Theoretical quantiles") +
+  ylab("Sample quantiles") +
+  # add mean and std to the plot
+  geom_hline(yintercept = mean(pairwise_allele_shared_fraction_null_lc_hc_summary_table$genome_wide_fraction_alleles_shared)+2*sd(pairwise_allele_shared_fraction_null_lc_hc_summary_table$genome_wide_fraction_alleles_shared), linetype = "dashed", color = "red") +
+  geom_hline(yintercept = mean(pairwise_allele_shared_fraction_null_lc_hc_summary_table$genome_wide_fraction_alleles_shared)-2*sd(pairwise_allele_shared_fraction_null_lc_hc_summary_table$genome_wide_fraction_alleles_shared), linetype = "dashed", color = "red")
+
+# qqplot for null hc:hc pairs
+ggplot(pairwise_allele_shared_fraction_null_hc_hc_summary_table, aes(sample = genome_wide_fraction_alleles_shared)) +
+  geom_qq() +
+  geom_qq_line() +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  ggtitle("Null hc:hc pairs") +
+  xlab("Theoretical quantiles") +
+  ylab("Sample quantiles") +
+  # add mean and std to the plot
+  geom_hline(yintercept = mean(pairwise_allele_shared_fraction_null_hc_hc_summary_table$genome_wide_fraction_alleles_shared)+2*sd(pairwise_allele_shared_fraction_null_hc_hc_summary_table$genome_wide_fraction_alleles_shared), linetype = "dashed", color = "red") +
+  geom_hline(yintercept = mean(pairwise_allele_shared_fraction_null_hc_hc_summary_table$genome_wide_fraction_alleles_shared)-2*sd(pairwise_allele_shared_fraction_null_hc_hc_summary_table$genome_wide_fraction_alleles_shared), linetype = "dashed", color = "red")
+
+# qqplot for null lc:lc pairs
+ggplot(pairwise_allele_shared_fraction_null_lc_lc_summary_table, aes(sample = genome_wide_fraction_alleles_shared)) +
+  geom_qq() +
+  geom_qq_line() +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  ggtitle("Null lc:lc pairs") +
+  xlab("Theoretical quantiles") +
+  ylab("Sample quantiles") +
+  # add mean and std to the plot
+  geom_hline(yintercept = mean(pairwise_allele_shared_fraction_null_lc_lc_summary_table$genome_wide_fraction_alleles_shared)+2*sd(pairwise_allele_shared_fraction_null_lc_lc_summary_table$genome_wide_fraction_alleles_shared), linetype = "dashed", color = "red") +
+  geom_hline(yintercept = mean(pairwise_allele_shared_fraction_null_lc_lc_summary_table$genome_wide_fraction_alleles_shared)-2*sd(pairwise_allele_shared_fraction_null_lc_lc_summary_table$genome_wide_fraction_alleles_shared), linetype = "dashed", color = "red")
+
+```
+
+```{r plot heatmap of genome_wide_fraction_alleles_shared for null pairs, fig.width=10, fig.height=10}
+# plot sample1.SRA vs sample2.SRA heatmap of genome_wide_fraction_alleles_shared for null lc:hc pairs
+ggplot(pairwise_allele_shared_fraction_null_lc_hc_summary_table, aes(x = sample1.SRA, y = sample2.SRA, fill = genome_wide_fraction_alleles_shared)) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "Genome-wide fraction\nof alleles shared", limits = c(0, 1), option = "turbo") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+# plot sample1.SRA vs sample2.SRA heatmap of genome_wide_fraction_alleles_shared for null hc:hc pairs
+ggplot(pairwise_allele_shared_fraction_null_hc_hc_summary_table, aes(x = sample1.SRA, y = sample2.SRA, fill = genome_wide_fraction_alleles_shared)) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "Genome-wide fraction\nof alleles shared", limits = c(0, 1), option = "turbo") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+# plot sample1.SRA vs sample2.SRA heatmap of genome_wide_fraction_alleles_shared for null lc:lc pairs
+ggplot(pairwise_allele_shared_fraction_null_lc_lc_summary_table, aes(x = sample1.SRA, y = sample2.SRA, fill = genome_wide_fraction_alleles_shared)) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "Genome-wide fraction\nof alleles shared", limits = c(0, 1), option = "turbo") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+```{r filter null}
+ThresholdNull <- 0.75
+
+subset(pairwise_allele_shared_fraction_null_lc_hc_summary_table, genome_wide_fraction_alleles_shared > ThresholdNull)
+subset(pairwise_allele_shared_fraction_summary_table, genome_wide_fraction_alleles_shared <= 0.87)
+
+subset(pairwise_allele_shared_fraction_null_lc_lc_summary_table, genome_wide_fraction_alleles_shared >0.75)
+
+#subset(pairwise_allele_shared_fraction_null_lc_hc_summary_table, genome_wide_fraction_alleles_shared <= ThresholdNull)->pairwise_allele_shared_fraction_null_lc_hc_summary_table
+
+```
+
+```{r plot genome_wide_fraction_alleles_shared distribution, fig.width=4, fig.height=4}
+# plot distribution of genome_wide_fraction_alleles_shared
+ggplot(pairwise_allele_shared_fraction_summary_table, aes(x = genome_wide_fraction_alleles_shared)) +
+  geom_histogram(binwidth = 0.05, fill = "grey", color = "black") +
+  scale_x_continuous(name = "Genome-wide fraction of alleles shared", limits = c(0, 1.05), expand = c(0,0)) +
+  scale_y_continuous(name = "Count", limits = c(0, 7), expand = c(0,0)) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+# calc mean and std of genome_wide_fraction_alleles_shared
+mean(pairwise_allele_shared_fraction_summary_table$genome_wide_fraction_alleles_shared)-> mean_genome_wide_fraction_alleles_shared
+sd(pairwise_allele_shared_fraction_summary_table$genome_wide_fraction_alleles_shared) -> sd_genome_wide_fraction_alleles_shared
+print("Real pairs")
+mean_genome_wide_fraction_alleles_shared
+sd_genome_wide_fraction_alleles_shared
+min(pairwise_allele_shared_fraction_summary_table$genome_wide_fraction_alleles_shared)
+max(pairwise_allele_shared_fraction_summary_table$genome_wide_fraction_alleles_shared)
+
+# plot genome_wide_fraction_alleles_shared for null lc:hc pairs
+ggplot(pairwise_allele_shared_fraction_null_lc_hc_summary_table, aes(x = genome_wide_fraction_alleles_shared)) +
+  geom_histogram(binwidth = 0.05, fill = "grey", color = "black") +
+  scale_x_continuous(name = "Genome-wide fraction of alleles shared", limits = c(0, 1.05), expand = c(0,0)) +
+  scale_y_continuous(name = "Count", expand = c(0,0.1)) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+# calc mean and std of genome_wide_fraction_alleles_shared for null lc:hc pairs
+mean(pairwise_allele_shared_fraction_null_lc_hc_summary_table$genome_wide_fraction_alleles_shared)-> mean_genome_wide_fraction_alleles_shared_null_lc_hc
+sd(pairwise_allele_shared_fraction_null_lc_hc_summary_table$genome_wide_fraction_alleles_shared) -> sd_genome_wide_fraction_alleles_shared_null_lc_hc
+print("Null lc:hc pairs")
+mean_genome_wide_fraction_alleles_shared_null_lc_hc
+sd_genome_wide_fraction_alleles_shared_null_lc_hc
+min(pairwise_allele_shared_fraction_null_lc_hc_summary_table$genome_wide_fraction_alleles_shared)
+max(pairwise_allele_shared_fraction_null_lc_hc_summary_table$genome_wide_fraction_alleles_shared)
+
+# plot genome_wide_fraction_alleles_shared for null hc:hc pairs
+ggplot(pairwise_allele_shared_fraction_null_hc_hc_summary_table, aes(x = genome_wide_fraction_alleles_shared)) +
+  geom_histogram(binwidth = 0.05, fill = "grey", color = "black") +
+  scale_x_continuous(name = "Genome-wide fraction of alleles shared", limits = c(0, 1.05), expand = c(0,0)) +
+  scale_y_continuous(name = "Count", expand = c(0,0.1)) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+# calc mean and std of genome_wide_fraction_alleles_shared for null hc:hc pairs
+mean(pairwise_allele_shared_fraction_null_hc_hc_summary_table$genome_wide_fraction_alleles_shared)-> mean_genome_wide_fraction_alleles_shared_null_hc_hc
+sd(pairwise_allele_shared_fraction_null_hc_hc_summary_table$genome_wide_fraction_alleles_shared) -> sd_genome_wide_fraction_alleles_shared_null_hc_hc
+print("Null hc:hc pairs")
+mean_genome_wide_fraction_alleles_shared_null_hc_hc
+sd_genome_wide_fraction_alleles_shared_null_hc_hc
+min(pairwise_allele_shared_fraction_null_hc_hc_summary_table$genome_wide_fraction_alleles_shared)
+max(pairwise_allele_shared_fraction_null_hc_hc_summary_table$genome_wide_fraction_alleles_shared)
+
+# plot genome_wide_fraction_alleles_shared for null lc:lc pairs
+ggplot(pairwise_allele_shared_fraction_null_lc_lc_summary_table, aes(x = genome_wide_fraction_alleles_shared)) +
+  geom_histogram(binwidth = 0.05, fill = "grey", color = "black") +
+  scale_x_continuous(name = "Genome-wide fraction of alleles shared", limits = c(0, 1.05), expand = c(0,0)) +
+  scale_y_continuous(name = "Count", expand = c(0,0.1)) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+# calc mean and std of genome_wide_fraction_alleles_shared for null lc:lc pairs
+mean(pairwise_allele_shared_fraction_null_lc_lc_summary_table$genome_wide_fraction_alleles_shared)-> mean_genome_wide_fraction_alleles_shared_null_lc_lc
+sd(pairwise_allele_shared_fraction_null_lc_lc_summary_table$genome_wide_fraction_alleles_shared) -> sd_genome_wide_fraction_alleles_shared_null_lc_lc
+print("Null lc:lc pairs")
+mean_genome_wide_fraction_alleles_shared_null_lc_lc
+sd_genome_wide_fraction_alleles_shared_null_lc_lc
+min(pairwise_allele_shared_fraction_null_lc_lc_summary_table$genome_wide_fraction_alleles_shared)
+max(pairwise_allele_shared_fraction_null_lc_lc_summary_table$genome_wide_fraction_alleles_shared)
+
+```
+
+```{r plot genome_wide_fraction_alleles_shared vs coverage, fig.width=2.5, fig.height=3}
+ggplot(pairwise_allele_shared_fraction_summary_table, aes(x = sample1.Bases/1e9/2.73, y = sample2.Bases/1e9/2.73, shape=group)) +
+  geom_point() +
+  scale_x_continuous(name = "Coverage of sample 1") +
+  scale_y_continuous(name = "Coverage of sample 2") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  theme(legend.position = "None")
+
+ggplot(pairwise_allele_shared_fraction_summary_table, aes(x = sample1.Bases/1e9/2.73, y = genome_wide_fraction_alleles_shared, shape=group)) +
+  geom_point() +
+  scale_x_continuous(name = "Coverage") +
+  scale_y_continuous(name = "Genome-wide fraction of alleles shared", limits = c(0, 1)) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  theme(legend.position = "None")
+
+ggplot(pairwise_allele_shared_fraction_summary_table, aes(x = sample2.Bases/1e9/2.73, y = genome_wide_fraction_alleles_shared)) +
+  geom_point() +
+  scale_x_continuous(name = "Coverage") +
+  scale_y_continuous(name = "Genome-wide fraction of alleles shared", limits = c(0, 1)) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+ggplot(pairwise_allele_shared_fraction_summary_table, aes(x = (sample2.Bases/1e9/2.73), y = genome_wide_fraction_alleles_shared, color=sample1.Bases/1e9/2.73)) +
+  geom_point() +
+  scale_x_continuous(name = "High coverage") +
+  scale_y_continuous(name = "Genome-wide fraction\nof alleles shared", limits = c(0.5, 1)) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "bottom") +
+  scale_color_viridis_c(name = "Low\ncoverage", limits = c(0, 5), option = "turbo")
+
+
+
+ggplot(pairwise_allele_shared_fraction_summary_table, aes(x = (sample1.Bases/1e9/2.73), y = genome_wide_fraction_alleles_shared, color=sample2.Bases/1e9/2.73)) +
+  scale_color_viridis_c(name = "High\ncoverage", limits = c(0, 70), option = "magma") +
+  geom_hline(yintercept = mean_genome_wide_fraction_alleles_shared, linetype = "dashed", color = "black") +
+  # add rectangle to show 1 std above and below mean
+  #geom_rect(aes(xmin = 0, xmax = 6, ymin = mean_genome_wide_fraction_alleles_shared - sd_genome_wide_fraction_alleles_shared, ymax = mean_genome_wide_fraction_alleles_shared + sd_genome_wide_fraction_alleles_shared), fill = "grey", alpha = 0.1, inherit.aes = FALSE) +
+  geom_point() +
+  scale_x_continuous(name = "Low coverage") +
+  scale_y_continuous(name = "Genome-wide fraction\nof alleles shared", limits = c(0.5, 1)) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "bottom") +
+  # add null lc:lc pairs to the plot
+  geom_point(data = pairwise_allele_shared_fraction_null_lc_lc_summary_table, aes(x = (sample1.Bases/1e9/2.73), y = genome_wide_fraction_alleles_shared), color = "grey25", shape = 18, size=2, stroke=0) +
+  # add null lc:hc pairs to the plot
+  geom_point(data = pairwise_allele_shared_fraction_null_lc_hc_summary_table, aes(x = (sample1.Bases/1e9/2.73), y = genome_wide_fraction_alleles_shared), color = "grey50", shape = 16, size=2, stroke=0) +
+  # add null hc:hc pairs to the plot
+  geom_point(data = pairwise_allele_shared_fraction_null_hc_hc_summary_table, aes(x = (sample1.Bases/1e9/2.73), y = genome_wide_fraction_alleles_shared), color = "grey75", shape = 15, size=2, stroke=0)
+
+```
+
+```{r add marginal density plot, fig.width=4, fig.height=4}
+library(ggplot2)
+library(patchwork)
+
+p_main <- ggplot(pairwise_allele_shared_fraction_summary_table,
+                 aes(x = (sample1.Bases / 1e9 / 2.73),
+                     y = genome_wide_fraction_alleles_shared,
+                     color = sample2.Bases / 1e9 / 2.73)) +
+  geom_hline(yintercept = mean_genome_wide_fraction_alleles_shared,
+             linetype = "dashed", color = "black") +
+  geom_point() +
+   geom_point(data = pairwise_allele_shared_fraction_null_lc_lc_summary_table,
+             aes(x = (sample1.Bases / 1e9 / 2.73),
+                 y = genome_wide_fraction_alleles_shared),
+             inherit.aes = FALSE,
+             color = "grey25",
+             shape = 18, stroke = 0, size = 2) +
+  geom_point(data = pairwise_allele_shared_fraction_null_lc_hc_summary_table,
+             aes(x = (sample1.Bases / 1e9 / 2.73),
+                 y = genome_wide_fraction_alleles_shared),
+             inherit.aes = FALSE,
+             color = "grey50",
+             shape = 16, stroke = 0, size = 2) +
+  # geom_point(data = pairwise_allele_shared_fraction_null_hc_hc_summary_table,
+  #            aes(x = (sample1.Bases / 1e9 / 2.73),
+  #                y = genome_wide_fraction_alleles_shared),
+  #            inherit.aes = FALSE,
+  #            color = "grey75",
+  #            shape = 15, stroke = 0, size = 2) +
+  scale_color_viridis_c(name = "High\ncoverage", limits = c(0, 70), option = "magma") +
+  scale_x_continuous(name = "Low coverage") +
+  scale_y_continuous(name = "Genome-wide fraction\nof alleles shared", limits = c(0.5, 1)) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "bottom")
+
+p_right <- ggplot()  +
+   geom_density(
+    data = pairwise_allele_shared_fraction_null_lc_lc_summary_table,
+    aes(x = genome_wide_fraction_alleles_shared),
+    fill = "grey25",
+    alpha = 0.5
+  ) +
+  geom_density(
+    data = pairwise_allele_shared_fraction_null_lc_hc_summary_table,
+    aes(x = genome_wide_fraction_alleles_shared),
+    fill = "grey50",
+    alpha = 0.5
+  ) +
+  geom_density(
+    data = pairwise_allele_shared_fraction_summary_table,
+    aes(x = genome_wide_fraction_alleles_shared),
+    fill = "red",
+    alpha = 0.4
+  ) +
+  #  geom_density(
+  #   data = pairwise_allele_shared_fraction_null_hc_hc_summary_table,
+  #   aes(x = genome_wide_fraction_alleles_shared),
+  #   fill = "grey75",
+  #   alpha = 0.5
+  # ) +
+  coord_flip() +
+  scale_x_continuous(limits = c(0.5, 1)) +
+  theme_bw() +
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.x = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+
+p_main + p_right + plot_layout(widths = c(4, 1.1)) -> p_combined
+
+p_combined
+
+# save as svg
+ggsave("Per_site_concordance_rate/Genome_wide_fraction_alleles_shared_vs_coverage.svg", p_combined, width = 3.5, height = 3.5)
+```
+
+```{r plot paired scatter plot of genome_wide_fraction_alleles_shared vs coverage for sample1 and sample2, fig.width=3, fig.height=3}
+# make to long
+pairwise_allele_shared_fraction_summary_table[,c("genome_wide_fraction_alleles_shared","sample1.Bases","sample2.Bases","Sample")] %>%
+  pivot_longer(cols = c("sample1.Bases", "sample2.Bases"), names_to = "sample", values_to = "Bases") -> pairwise_allele_shared_fraction_summary_table_Bases_long
+
+pairwise_allele_shared_fraction_summary_table_Bases_long$sample <- gsub("sample1.Bases", "low coverage", pairwise_allele_shared_fraction_summary_table_Bases_long$sample)
+pairwise_allele_shared_fraction_summary_table_Bases_long$sample <- gsub("sample2.Bases", "high coverage", pairwise_allele_shared_fraction_summary_table_Bases_long$sample)
+
+
+library(ggh4x)
+
+
+ggplot(
+  pairwise_allele_shared_fraction_summary_table_Bases_long,
+  aes(
+    x = Bases / 1e9 / 2.73,
+    y = genome_wide_fraction_alleles_shared,
+    shape = sample,
+    color = sample
+  )
+) +
+  geom_line(aes(group = Sample), linewidth = 0.1, color="black") +
+  geom_point() +
+  scale_y_continuous(
+    name = "Genome-wide\nvariants shared",
+    limits = c(0, 1)
+  ) +
+  scale_x_continuous(
+    name = "Coverage"
+  ) +
+  scale_shape_manual(
+    name = "Library covergage",
+    values = c(16, 17),
+    labels = c("low", "high")
+  ) +
+  scale_color_manual(
+    name = "Library covergage",
+    values = c("#b067a3", "#9c954d"),
+    labels = c("low", "high")
+  ) +
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom",
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black")
+  ) +
+  coord_axes_inside(
+    xintercept = 20,
+    yintercept = 0
+  ) -> p_scatter
+
+p_scatter
+
+# save as svg
+ggsave("Genome_wide_fraction_alleles_shared_vs_coverage_paired_scatter.svg", p_scatter, width = 3, height = 3)
+```
+
+```{r estimate p-value for each real pair based on null lc hc distribution}
+mean_genome_wide_fraction_alleles_shared_null_lc_hc
+sd_genome_wide_fraction_alleles_shared_null_lc_hc
+
+lapply(pairwise_allele_shared_fraction_summary_table$genome_wide_fraction_alleles_shared,
+       function(X) pnorm(X, mean = mean_genome_wide_fraction_alleles_shared_null_lc_hc, sd = sd_genome_wide_fraction_alleles_shared_null_lc_hc, lower.tail = FALSE)
+       ) %>% unlist() -> pairwise_allele_shared_fraction_summary_table$p_value_lchc_null
+
+# apply multiple testing correction using p.adjust
+pairwise_allele_shared_fraction_summary_table$p_value_lchc_null_adj <- p.adjust(pairwise_allele_shared_fraction_summary_table$p_value_lchc_null, method = "fdr")
+
+# save pairwise_allele_shared_fraction_summary_table with p-values
+write.table(pairwise_allele_shared_fraction_summary_table, "pairwise_allele_shared_fraction_summary_table_with_pvalues.tsv", sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+```{r import all pairwise_allele_shared_fraction_10kb_bins, fig.width=10, fig.height=3}
+library(data.table)
+library(dplyr)
+
+files <- list.files(
+  "Per_site_concordance_rate/Binned_concordance_rates",
+  pattern = "^pairwise_allele_shared_fraction_.*_10kb_bins\\.tsv$",
+  full.names = TRUE
+)
+
+all_pairwise_10kb_bins <- list()
+
+for (i in seq_along(files)) {
+  file <- files[i]
+  
+  fread(file) -> df
+  colnames(df) <- c("Pos", "Allele_shared_fraction", "Sites")
+  
+  df$Pos %>%
+    strsplit(split = " ") %>%
+    sapply(function(x) x[1]) -> df$chr
+  
+  df$Pos %>%
+    strsplit(split = " ") %>%
+    sapply(function(x) x[2]) %>%
+    as.numeric() -> df$start
+  
+  df$Pos %>%
+    strsplit(split = " ") %>%
+    sapply(function(x) x[3]) %>%
+    as.numeric() -> df$end
+  
+  df <- df %>%
+    filter(chr %in% paste0("chr", 1:19))
+  
+  df$chr <- factor(df$chr, levels = paste0("chr", 1:19), ordered = TRUE)
+  
+  basename(file) %>%
+    sub("^pairwise_allele_shared_fraction_", "", .) %>%
+    sub("_10kb_bins\\.tsv$", "", .) -> comparison
+  
+  strsplit(comparison, "_vs_")[[1]][1] -> sample1
+  strsplit(comparison, "_vs_")[[1]][2] -> sample2
+  
+  df$sample1 <- sample1
+  df$sample2 <- sample2
+  df$comparison <- comparison
+  
+  all_pairwise_10kb_bins[[comparison]] <- df
+}
+
+bind_rows(all_pairwise_10kb_bins) -> all_pairwise_10kb_bins
+
+
+# add sample name to all_pairwise_10kb_bins by matching sample1 and sample2 with pairwise_allele_shared_fraction_summary_table
+all_pairwise_10kb_bins %>%
+  dplyr::left_join(pairwise_allele_shared_fraction_summary_table[,c("sample1.SRA", "sample1.Bases")], by = c("sample1" = "sample1.SRA")) %>%
+  dplyr::rename(sample1.Bases = sample1.Bases) -> all_pairwise_10kb_bins
+
+# add Sample name to all_pairwise_10kb_bins by matching sample1 and sample2 with pairwise_allele_shared_fraction_summary_table
+all_pairwise_10kb_bins %>%
+  dplyr::left_join(pairwise_allele_shared_fraction_summary_table[,c("sample1.SRA", "Sample")], by = c("sample1" = "sample1.SRA")) -> all_pairwise_10kb_bins
+```
+
+```{r Calculate null bin metrics}
+all_pairwise_10kb_bins %>%
+  group_by(chr, start, end) %>%
+  summarise(
+    mean_allele_shared_fraction = mean(Allele_shared_fraction, na.rm = TRUE),
+    sd_allele_shared_fraction = sd(Allele_shared_fraction, na.rm = TRUE),
+    min_allele_shared_fraction = min(Allele_shared_fraction, na.rm = TRUE),
+    max_allele_shared_fraction = max(Allele_shared_fraction, na.rm = TRUE),
+    n_pairs = n(),
+    .groups = "drop"
+  ) -> pairwise_10kb_summary
+
+pairwise_10kb_summary$sd_allele_shared_fraction[is.na(pairwise_10kb_summary$sd_allele_shared_fraction)] <- 0
+
+pairwise_10kb_summary <- pairwise_10kb_summary %>%
+  mutate(
+    xmid = (start + end) / 2 / 1e6
+  )
+
+```
+
+```{r plot heatmap of allele shared fraction across genome, fig.width=20, fig.height=12}
+ggplot(all_pairwise_10kb_bins, aes(x = start/1e6, fill = Allele_shared_fraction, y=1)) +
+  geom_tile() +
+  facet_wrap(Sample~chr, scales = "free_x") +
+  scale_x_continuous(name = "Genomic position") +
+  scale_fill_viridis_c(name = "Allele shared\nfraction", limits = c(0, 1), option = "turbo") +
+  ylab("Shared allele fraction") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()) +
+  # set background color to light grey
+  theme(panel.background = element_rect(fill = "lightgrey"))
+
+```
+
+
+```{r plot heatmap of allele shared fraction across genome for chr1, fig.width=6, fig.height=2}
+ggplot(subset(all_pairwise_10kb_bins, chr=="chr10"), aes(x = start/1e6, fill = Allele_shared_fraction, y=Sample)) +
+  geom_tile() +
+  #facet_wrap(Sample~., scales = "free_x") +
+  scale_x_continuous(name = "Genomic position") +
+  scale_fill_viridis_c(name = "Allele shared\nfraction", limits = c(0, 1), option = "turbo") +
+  ylab("Animal") +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  # set background color to light grey
+  theme(panel.background = element_rect(fill = "lightgrey")) -> p_chr
+
+p_chr
+
+# save as svg
+ggsave("Per_site_concordance_rate/Allele_shared_fraction_chr10.svg", p_chr, width = 6, height = 2)
+
+```
+
+```{r plot Sites vs Allele_shared_fraction, fig.width=4, fig.height=4}
+ggplot(all_pairwise_10kb_bins, aes(x = Sites, y = Allele_shared_fraction)) +
+  geom_point(stroke=0, size=0.05) +
+  scale_x_continuous(name = "Number of sites in bin") +
+  scale_y_continuous(name = "Allele shared fraction", limits = c(0, 1)) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+```
+
+```{r import all pairwise_allele_shared_fraction_null_lc_hc_10kb_bins, fig.width=10, fig.height=3}
+files <- list.files(
+  "Null_lc_hc_Per_site_concordance_rate/Binned_concordance_rates",
+  pattern = "^pairwise_allele_shared_fraction_null_lc_hc_.*_10kb_bins\\.tsv$",
+  full.names = TRUE
+)
+
+all_pairwise_null_lc_hc_10kb_bins <- list()
+
+for (i in seq_along(files)) {
+  file <- files[i]
+  
+  fread(file) -> df
+  colnames(df) <- c("Pos", "Allele_shared_fraction", "Sites")
+  
+  df$Pos %>%
+    strsplit(split = " ") %>%
+    sapply(function(x) x[1]) -> df$chr
+  
+  df$Pos %>%
+    strsplit(split = " ") %>%
+    sapply(function(x) x[2]) %>%
+    as.numeric() -> df$start
+  
+  df$Pos %>%
+    strsplit(split = " ") %>%
+    sapply(function(x) x[3]) %>%
+    as.numeric() -> df$end
+  
+  df <- df %>%
+    filter(chr %in% paste0("chr", 1:19))
+  
+  df$chr <- factor(df$chr, levels = paste0("chr", 1:19), ordered = TRUE)
+  
+  basename(file) %>%
+    sub("^pairwise_allele_shared_fraction_null_lc_hc_", "", .) %>%
+    sub("_10kb_bins\\.tsv$", "", .) -> comparison
+  
+  strsplit(comparison, "_vs_")[[1]][1] -> sample1
+  strsplit(comparison, "_vs_")[[1]][2] -> sample2
+  
+  df$sample1 <- sample1
+  df$sample2 <- sample2
+  df$comparison <- comparison
+  
+  all_pairwise_null_lc_hc_10kb_bins[[comparison]] <- df
+}
+
+bind_rows(all_pairwise_null_lc_hc_10kb_bins) -> all_pairwise_null_lc_hc_10kb_bins
+```
+
+```{r import all pairwise_allele_shared_fraction_null_lc_lc_10kb_bins, fig.width=10, fig.height=3}
+files <- list.files(
+  "Null_lc_lc_Per_site_concordance_rate/Binned_concordance_rates",
+  pattern = "^pairwise_allele_shared_fraction_null_lc_lc_.*_10kb_bins\\.tsv$",
+  full.names = TRUE
+)
+
+all_pairwise_null_lc_lc_10kb_bins <- list()
+
+for (i in seq_along(files)) {
+  file <- files[i]
+  
+  fread(file) -> df
+  colnames(df) <- c("Pos", "Allele_shared_fraction", "Sites")
+  
+  df$Pos %>%
+    strsplit(split = " ") %>%
+    sapply(function(x) x[1]) -> df$chr
+  
+  df$Pos %>%
+    strsplit(split = " ") %>%
+    sapply(function(x) x[2]) %>%
+    as.numeric() -> df$start
+  
+  df$Pos %>%
+    strsplit(split = " ") %>%
+    sapply(function(x) x[3]) %>%
+    as.numeric() -> df$end
+  
+  df <- df %>%
+    filter(chr %in% paste0("chr", 1:19))
+  
+  df$chr <- factor(df$chr, levels = paste0("chr", 1:19), ordered = TRUE)
+  
+  basename(file) %>%
+    sub("^pairwise_allele_shared_fraction_null_lc_lc_", "", .) %>%
+    sub("_10kb_bins\\.tsv$", "", .) -> comparison
+  
+  strsplit(comparison, "_vs_")[[1]][1] -> sample1
+  strsplit(comparison, "_vs_")[[1]][2] -> sample2
+  
+  df$sample1 <- sample1
+  df$sample2 <- sample2
+  df$comparison <- comparison
+  
+  all_pairwise_null_lc_lc_10kb_bins[[comparison]] <- df
+}
+
+bind_rows(all_pairwise_null_lc_lc_10kb_bins) -> all_pairwise_null_lc_lc_10kb_bins
+```
+
+```{r import all pairwise_allele_shared_fraction_null_hc_hc_10kb_bins, fig.width=10, fig.height=3}
+files <- list.files(
+  "Null_hc_hc_Per_site_concordance_rate/Binned_concordance_rates",
+  pattern = "^pairwise_allele_shared_fraction_null_hc_hc_.*_10kb_bins\\.tsv$",
+  full.names = TRUE
+)
+
+all_pairwise_null_hc_hc_10kb_bins <- list()
+
+for (i in seq_along(files)) {
+  file <- files[i]
+  
+  fread(file) -> df
+  colnames(df) <- c("Pos", "Allele_shared_fraction", "Sites")
+  
+  df$Pos %>%
+    strsplit(split = " ") %>%
+    sapply(function(x) x[1]) -> df$chr
+  
+  df$Pos %>%
+    strsplit(split = " ") %>%
+    sapply(function(x) x[2]) %>%
+    as.numeric() -> df$start
+  
+  df$Pos %>%
+    strsplit(split = " ") %>%
+    sapply(function(x) x[3]) %>%
+    as.numeric() -> df$end
+  
+  df <- df %>%
+    filter(chr %in% paste0("chr", 1:19))
+  
+  df$chr <- factor(df$chr, levels = paste0("chr", 1:19), ordered = TRUE)
+  
+  basename(file) %>%
+    sub("^pairwise_allele_shared_fraction_null_hc_hc_", "", .) %>%
+    sub("_10kb_bins\\.tsv$", "", .) -> comparison
+  
+  strsplit(comparison, "_vs_")[[1]][1] -> sample1
+  strsplit(comparison, "_vs_")[[1]][2] -> sample2
+  
+  df$sample1 <- sample1
+  df$sample2 <- sample2
+  df$comparison <- comparison
+  
+  all_pairwise_null_hc_hc_10kb_bins[[comparison]] <- df
+}
+
+bind_rows(all_pairwise_null_hc_hc_10kb_bins) -> all_pairwise_null_hc_hc_10kb_bins
+```
+
+```{r Calculate null lc hc bin metrics}
+all_pairwise_null_lc_hc_10kb_bins %>%
+  group_by(chr, start, end) %>%
+  summarise(
+    mean_allele_shared_fraction = mean(Allele_shared_fraction, na.rm = TRUE),
+    sd_allele_shared_fraction = sd(Allele_shared_fraction, na.rm = TRUE),
+    min_allele_shared_fraction = min(Allele_shared_fraction, na.rm = TRUE),
+    max_allele_shared_fraction = max(Allele_shared_fraction, na.rm = TRUE),
+    n_pairs = n(),
+    .groups = "drop"
+  ) -> null_lc_hc_10kb_summary
+
+null_lc_hc_10kb_summary$sd_allele_shared_fraction[is.na(null_lc_hc_10kb_summary$sd_allele_shared_fraction)] <- 0
+
+null_lc_hc_10kb_summary <- null_lc_hc_10kb_summary %>%
+  mutate(
+    xmid = (start + end) / 2 / 1e6
+  )
+```
+
+```{r Calculate null lc lc bin metrics}
+all_pairwise_null_lc_lc_10kb_bins %>%
+  group_by(chr, start, end) %>%
+  summarise(
+    mean_allele_shared_fraction = mean(Allele_shared_fraction, na.rm = TRUE),
+    sd_allele_shared_fraction = sd(Allele_shared_fraction, na.rm = TRUE),
+    min_allele_shared_fraction = min(Allele_shared_fraction, na.rm = TRUE),
+    max_allele_shared_fraction = max(Allele_shared_fraction, na.rm = TRUE),
+    n_pairs = n(),
+    .groups = "drop"
+  ) -> null_lc_lc_10kb_summary
+
+null_lc_lc_10kb_summary$sd_allele_shared_fraction[is.na(null_lc_lc_10kb_summary$sd_allele_shared_fraction)] <- 0
+
+null_lc_lc_10kb_summary <- null_lc_lc_10kb_summary %>%
+  mutate(
+    xmid = (start + end) / 2 / 1e6
+  )
+```
+
+
+```{r Calculate null hc hc bin metrics}
+all_pairwise_null_hc_hc_10kb_bins %>%
+  group_by(chr, start, end) %>%
+  summarise(
+    mean_allele_shared_fraction = mean(Allele_shared_fraction, na.rm = TRUE),
+    sd_allele_shared_fraction = sd(Allele_shared_fraction, na.rm = TRUE),
+    min_allele_shared_fraction = min(Allele_shared_fraction, na.rm = TRUE),
+    max_allele_shared_fraction = max(Allele_shared_fraction, na.rm = TRUE),
+    n_pairs = n(),
+    .groups = "drop"
+  ) -> null_hc_hc_10kb_summary
+
+null_hc_hc_10kb_summary$sd_allele_shared_fraction[is.na(null_hc_hc_10kb_summary$sd_allele_shared_fraction)] <- 0
+
+null_hc_hc_10kb_summary <- null_hc_hc_10kb_summary %>%
+  mutate(
+    xmid = (start + end) / 2 / 1e6
+  )
+```
+
+```{r compare real vs null intervals, fig.width=4, fig.height=3}
+# scatter plot of mean_allele_shared_fraction in real pairs vs mean_allele_shared_fraction in null lc:hc pairs
+ggplot(pairwise_10kb_summary, aes(x = mean_allele_shared_fraction, y = null_lc_hc_10kb_summary$mean_allele_shared_fraction)) +
+  geom_hex(bins = 100) +
+  scale_x_continuous(name = "Mean allele shared fraction\nin real pairs", limits = c(0,1), expand = c(0,0)) +
+  scale_y_continuous(name = "Mean allele shared fraction\nin null lc:hc pairs", limits = c(0,1), expand = c(0,0)) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  scale_fill_viridis_c(name = "Count", option = "turbo") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "black", linewidth = 1)
+
+# scatter plot of mean_allele_shared_fraction in real pairs vs mean_allele_shared_fraction in null lc:lc pairs
+ggplot(pairwise_10kb_summary, aes(x = mean_allele_shared_fraction, y = null_lc_lc_10kb_summary$mean_allele_shared_fraction)) +
+  geom_hex(bins = 100) +
+  scale_x_continuous(name = "Mean allele shared fraction\nin real pairs", limits = c(0,1), expand = c(0,0)) +
+  scale_y_continuous(name = "Mean allele shared fraction\nin null lc:lc pairs", limits = c(0,1), expand = c(0,0)) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  scale_fill_viridis_c(name = "Count", option = "turbo") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "black", linewidth = 1)
+
+# scatter plot of mean_allele_shared_fraction in real pairs vs mean_allele_shared_fraction in null hc:hc pairs
+ggplot(pairwise_10kb_summary, aes(x = mean_allele_shared_fraction, y = null_hc_hc_10kb_summary$mean_allele_shared_fraction)) +
+  geom_hex(bins = 100) +
+  scale_x_continuous(name = "Mean allele shared fraction in\nreal pairs", limits = c(0,1), expand = c(0,0)) +
+  scale_y_continuous(name = "Mean allele shared fraction in\nnull hc:hc pairs", limits = c(0,1), expand = c(0,0)) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  scale_fill_viridis_c(name = "Count", option = "turbo") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "black", linewidth = 1)
+```
+
+```{r plot lineplot of allele shared fraction across genome, fig.width=4, fig.height=2}
+ggplot(subset(null_lc_hc_10kb_summary, chr == "chr1"), aes(x = xmid, y = mean_allele_shared_fraction)) +
+  geom_line(color = "blue", linewidth = 0.05, alpha=0.9) +
+  scale_x_continuous(name = "Genomic position (Mb)", expand = c(0,0)) +
+  scale_y_continuous(name = "Allele shared fraction", limits = c(0, 1), expand = c(0,0)) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  # add real pairs to the plot
+  geom_line(data = subset(pairwise_10kb_summary, chr == "chr1"), aes(x = xmid, y = mean_allele_shared_fraction), color = "red", linewidth = 0.05, alpha=0.9) -> p_lineplot_shared_fraction
+
+
+ggplot(subset(subset(all_pairwise_10kb_bins, Sample=="F15" & chr == "chr1"), chr == "chr1"), aes(x = start/1e6, y = Sites/10)) +
+  geom_line(color = "black", linewidth = 0.075, alpha=0.9) +
+  scale_x_continuous(name = "Genomic position (Mb)", expand = c(0,0)) +
+  scale_y_continuous(name = "Loci per Kb", expand = c(0,0)) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) -> p_lineplot_sites
+
+
+p_lineplot_shared_fraction
+p_lineplot_sites
+
+# save svg
+ggsave("Per_site_concordance_rate/Allele_shared_fraction_chr1_lineplot.svg", p_lineplot_shared_fraction, width = 4, height = 2)
+ggsave("Per_site_concordance_rate/Loci_per_Kb_chr1_lineplot.svg", p_lineplot_sites, width = 4, height = 2)
+
+```

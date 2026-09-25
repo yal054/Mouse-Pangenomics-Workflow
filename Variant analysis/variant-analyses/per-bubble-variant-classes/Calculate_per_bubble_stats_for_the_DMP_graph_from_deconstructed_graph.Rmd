@@ -1,0 +1,720 @@
+---
+title: "Variation in CC Graph Bubbles"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Calculate_per_bubble_stats_for_the_DMP_graph_from_deconstructed_graph/"))
+set.seed(0)
+
+require("ggplot2")
+require("cowplot")
+require("viridis")
+require("reshape2")
+require("dplyr")
+require("tidyverse")
+library(plotly)
+library(Rtsne)
+library(stringr)
+library(ggbeeswarm)
+
+library(ggforce)
+library(ggbreak)
+
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+
+theme_set(theme_cowplot())
+
+library(readr)
+```
+
+```{r import and process site-level-summaries}
+# Load unexploded per‐site stats
+sites <- read_tsv("DMP.full.vcf.tsv", col_types = cols(
+  CHROM          = col_character(),
+  POS            = col_integer(),
+  ID             = col_character(),
+  NUM_ALTS       = col_integer(),
+  SITE_LABEL     = col_integer()
+))
+
+# Total number of sites
+n_sites <- nrow(sites)
+message("Total sites: ", n_sites)
+
+# Number of sites per chromosome
+sites_per_chr <- sites %>% 
+  count(CHROM, name = "n_sites") %>% 
+  arrange(desc(n_sites))
+
+sites_per_chr %>% 
+  print(n = Inf)
+```
+
+```{r Plot distribution of sites per chromosome, include=TRUE, fig.width=11/3, fig.height=8/3}
+# Plot: sites per chromosome
+ggplot(sites_per_chr %>% mutate(n_sites_m = n_sites / 1e6),
+       aes(y = fct_reorder(CHROM, n_sites_m), x = n_sites_m)) +
+  geom_col(fill = "#0072B2") +
+  labs(
+    title = "Number of Sites per Chromosome",
+    y = "Chromosome",
+    x = expression(Sites~"(×10"^6*")")
+  ) +
+  JFMVTheme +
+  scale_x_continuous(expand=c(0,0), limits=c(0, 4), 
+                     breaks=seq(0, 3, 0.5)) +
+  theme(
+    axis.text.x = element_text(size = 7),
+    axis.text.y = element_text(size = 7),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  )->p1
+
+p1
+
+# save as svg
+ggsave("sites_per_chr.svg", p1, width = 11/3, height = 8/3, units = "in", dpi = 300)
+```
+
+```{r generate num alts per site frequency table}
+sites %>% 
+  count(NUM_ALTS) %>% 
+  arrange(desc(NUM_ALTS)) %>% 
+  mutate(
+    NUM_ALTS = factor(NUM_ALTS, levels = unique(NUM_ALTS)),
+    NUM_ALTS = fct_reorder(NUM_ALTS, n)
+  ) -> num_alts_per_site
+
+# factor order from NUM_ALTS by numerical value
+num_alts_per_site$NUM_ALTS <- factor(num_alts_per_site$NUM_ALTS,
+                                      levels = num_alts_per_site$NUM_ALTS[order(as.numeric(levels(num_alts_per_site$NUM_ALTS)))])
+```
+
+```{r Distribution of ALTs per site, include=TRUE, fig.width=12/3, fig.height=8/3}
+ggplot(num_alts_per_site, aes(x = NUM_ALTS, y = n/1e6)) +
+geom_col(fill = "#0072B2") +
+labs(title = "Distribution of ALT Alleles per Site",
+     x = "Number of ALT Alleles", y = expression(Sites~"(×10"^6*")")) +
+JFMVTheme +
+scale_y_continuous(expand=c(0,0), limits=c(0, max(num_alts_per_site$n)*1.1/1e6)) +
+theme(
+  axis.text.x = element_text(size = 8),
+  axis.text.y = element_text(size = 8),
+  axis.title.x = element_text(size = 12),
+  axis.title.y = element_text(size = 12)
+) +
+scale_y_break(
+      c(3, 10),         # drop the region from 3 to 22 (in millions)
+      scales = 0.25     # relative size of the gap
+    ) -> p2
+
+p2
+
+# Save as svg
+ggsave("num_alts_per_site.svg", p2, width = 11/3, height = 8/3, units = "in", dpi = 300)
+```
+
+```{r Summary of variant classes, include=TRUE, fig.width=11/1, fig.height=8/2}
+sites %>% 
+  count(VARIANT_CLASSES) %>% 
+  arrange(desc(n)) %>% 
+  mutate(
+    VARIANT_CLASSES = factor(VARIANT_CLASSES, levels = unique(VARIANT_CLASSES)),
+    VARIANT_CLASSES = fct_reorder(VARIANT_CLASSES, n)
+  ) -> variant_classes
+
+# For the purposes of this plot, replace COMPOSITE with INDEL
+variant_classes$VARIANT_CLASSES <- str_replace_all(variant_classes$VARIANT_CLASSES, "COMPOSITE", "INDEL")
+
+# For any duplicate VARIANT_CLASSES values, sum the counts
+variant_classes <- variant_classes %>%
+  group_by(VARIANT_CLASSES) %>%
+  summarise(n = sum(n)) %>%
+  ungroup()
+
+# describe the variant classes
+# How many unique variant classes are there?
+n_unique_classes <- variant_classes %>%
+  summarise(n = n_distinct(VARIANT_CLASSES)) %>%
+  pull(n)
+message("Unique variant classe patterns: ", n_unique_classes)
+
+# sum patterns that are the same elements in different order (i.e. "SNV,INDEL" and "INDEL,SNV")
+## to do this I need to first take the string, split it by ",", sort the elements, and then paste them back together
+variant_classes <- variant_classes %>%
+  mutate(
+    VARIANT_CLASSES = str_split(VARIANT_CLASSES, ","),
+    VARIANT_CLASSES = map_chr(VARIANT_CLASSES, ~ paste(sort(.x), collapse = ",")),
+    VARIANT_CLASSES = factor(VARIANT_CLASSES, levels = unique(VARIANT_CLASSES)),
+    VARIANT_CLASSES = fct_reorder(VARIANT_CLASSES, n)
+  )
+## for any duplicate VARIANT_CLASSES values, sum the counts
+variant_classes <- variant_classes %>%
+  group_by(VARIANT_CLASSES) %>%
+  summarise(n = sum(n)) %>%
+  ungroup()
+
+# To simplify plotting add column replace INDEL with I, SNV with S, and MNV with M
+variant_classes$ClassSig<-variant_classes$VARIANT_CLASSES
+variant_classes$ClassSig<-str_replace_all(variant_classes$ClassSig, "INDEL", "I")
+variant_classes$ClassSig<-str_replace_all(variant_classes$ClassSig, "SNV", "S")
+variant_classes$ClassSig<-str_replace_all(variant_classes$ClassSig, "MNV", "M")
+
+# For each VARIANT_CLASSES compress string, so if there are mutliple of the same class in the same pattern, it will be compressed to a single letter and a number of occurrences. So "I,I,I,I,I,I,I,I,I,I,I" will be compressed to "I10" and "I,I,I,I,I,M,M,M" will be compressed to "I5M3"
+## to do this I need to first take the string, split it by ",", count the number of occurrences of each element, and then paste them back together
+variant_classes <- variant_classes %>% 
+  mutate(
+    ClassSig = map_chr(VARIANT_CLASSES, ~ {
+      alleles <- str_split(.x, ",")[[1]]      # split into vector
+      cnts    <- table(alleles)               # count each unique
+      paste0(names(cnts), cnts, collapse = "")  # e.g. "INDEL5MNV3SNV2"
+    })
+  )
+
+## Now replace INDEL with I, SNV with S, and MNV with M
+variant_classes$ClassSig<-str_replace_all(variant_classes$ClassSig, "INDEL", "I")
+variant_classes$ClassSig<-str_replace_all(variant_classes$ClassSig, "SNV", "S")
+variant_classes$ClassSig<-str_replace_all(variant_classes$ClassSig, "MNV", "M")
+
+# Sort by n (largest to smallest)
+variant_classes <- variant_classes %>%
+  arrange(desc(n))
+
+# How many of those make up 99% of the data? if sorted by n, from largest to smallest how entries does it take to reach 99% of the data?
+variant_classes <- variant_classes %>%
+  arrange(desc(n)) %>%
+  mutate(
+    Percent_n = n / sum(n) * 100,
+    Cumulative_Percent = cumsum(Percent_n)
+  )
+message("Variant classes that make up 99% of the data: ", 
+        sum(variant_classes$Cumulative_Percent < 99)+1)
+
+# save the variant_classes data frame to file
+write_tsv(variant_classes, "variant_pattern_count_table.tsv")
+
+# Order the ClassSig column by the order of the n column
+variant_classes$ClassSig <- factor(variant_classes$ClassSig, 
+                                    levels = variant_classes$ClassSig[order(variant_classes$n, decreasing = TRUE)])
+
+# Plot: variant classes for patterns that make up 99% of the data
+ggplot(variant_classes[1:(sum(variant_classes$Cumulative_Percent < 99.9)+1),], aes(x = ClassSig, y = n/1e6)) +
+  geom_col(fill = "#0072B2") +
+  labs(title = "Distribution of Variant Classes",
+       x = "Variant Class", y = expression(Sites~"(×10"^6*")")) +
+  JFMVTheme +
+  scale_y_continuous(expand=c(0,0), limits=c(0, max(variant_classes$n)*1.1/1e6)) +
+  theme(
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  ) +
+  ggrepel::geom_text_repel(
+    aes(label = paste0(round(Percent_n, 2), "%")),
+    size = 3,
+    nudge_x = 0.4,
+    nudge_y = 0.5,
+    segment.size = 0.2,
+    show.legend = FALSE
+  ) -> p3
+
+p3
+
+# Save as svg
+ggsave("variant_classes.svg", p3, width = 11/1, height = 8/2, units = "in", dpi = 300)
+
+ggplot(
+  variant_classes[1:(sum(variant_classes$Cumulative_Percent < 99.9)+1), ],
+  aes(x = ClassSig, y = n/1e6)
+) +
+  geom_col(fill = "#0072B2") +
+  labs(
+    title =    "Breakdown of Variant Class Patterns",
+    x =        "Variant Class",
+    y =        expression(Sites~"(×10"^6*")")
+  ) +
+  scale_y_continuous(expand=c(0,0), limits=c(0, max(variant_classes$n)*1.1/1e6)) +
+  JFMVTheme +
+  theme(
+    axis.text.x  = element_text(size = 10),
+    axis.text.y  = element_text(size = 10),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  ) +
+  scale_y_break(
+      c(2, 3),         # drop the region from 3 to 22 (in millions)
+      scales = 0.3     # relative size of the gap
+  ) + 
+  # add repelled text labels with percentage
+  ggrepel::geom_text_repel(
+    aes(label = paste0(round(Percent_n, 2), "%")),
+    size = 3,
+    nudge_x = 0.5,
+    nudge_y = 0.5,
+    segment.size = 0.2,
+    show.legend = FALSE
+  ) -> p4
+
+p4
+
+# Save as svg
+ggsave("variant_classes_breakdown.svg", p4, width = 11/1, height = 8/2, units = "in", dpi = 300)
+
+```
+
+```{r prep to upset plot count of variant classes by ALT count}
+# add columns for number of ALT alleles per site
+variant_classes$ALT_Count <- str_count(variant_classes$VARIANT_CLASSES, "I") +
+  str_count(variant_classes$VARIANT_CLASSES, "M") +
+  str_count(variant_classes$VARIANT_CLASSES, "S")
+
+# Add column with combination fo SNV, INDEL, MNV label. S1 becomes "SNV", I1M1 becomes "INDEL + MNV", I1 becomes "INDEL", S1M1 becomes "SNV + MNV", S1I1M1 becomes "SNV + INDEL + MNV", etc. Using grepl to find the pattern
+variant_classes$ClassMix <- variant_classes$VARIANT_CLASSES
+
+variant_classes$ClassMix<-paste0(
+ifelse(grepl("SNV", variant_classes$ClassMix),"SNV+",""),
+ifelse(grepl("INDEL", variant_classes$ClassMix),"INDEL+",""),
+ifelse(grepl("MNV", variant_classes$ClassMix),"MNV+","")
+)
+
+
+# remove any trailing "+" from the ClassMix column
+variant_classes$ClassMix<-str_replace(variant_classes$ClassMix, "\\+$", "")
+
+# Create thresholded Allele count
+variant_classes$ALT_Count_Group<-variant_classes$ALT_Count
+# if ALT_Count_Group == 1, then set to "2 alleles"
+variant_classes$ALT_Count_Group<-ifelse(variant_classes$ALT_Count==1, "2 alleles", variant_classes$ALT_Count_Group)
+# if ALT_Count_Group == 2, then set to "3 alleles"
+variant_classes$ALT_Count_Group<-ifelse(variant_classes$ALT_Count==2, "3 alleles", variant_classes$ALT_Count_Group)
+# if ALT_Count_Group > 3, then set to ">3 alleles"
+variant_classes$ALT_Count_Group<-ifelse(variant_classes$ALT_Count>=3, ">3 alleles", variant_classes$ALT_Count_Group)
+
+# add n merging the same ClassMix and ALT_Count_Group
+variant_classes_summed_counts <- variant_classes %>%
+  group_by(ClassMix, ALT_Count_Group) %>%
+  summarise(n = sum(n)) %>%
+  ungroup()
+
+
+# Order the ClassMix column by the order of the n column
+variant_classes_summed_counts$ClassMix <- factor(variant_classes_summed_counts$ClassMix, 
+                                                  levels = unique(variant_classes_summed_counts$ClassMix[order(variant_classes_summed_counts$n, decreasing = TRUE)]))
+
+# Order the ALT_Count_Group column by "2 alleles", "3 alleles", ">3 alleles"
+variant_classes_summed_counts$ALT_Count_Group <- factor(variant_classes_summed_counts$ALT_Count_Group, 
+                                                          levels = c(">3 alleles", "3 alleles", "2 alleles"))
+
+variant_classes_summed_counts %>% 
+  print(n = Inf)
+```
+
+```{r upset plot count of variant classes by ALT count, include=TRUE, fig.width=11/3, fig.height=8/3}
+# Plot n as a function of ClassMix grouped by ALT_Count
+ggplot(variant_classes_summed_counts, aes(x = ClassMix, y = n/1e6, fill = ALT_Count_Group)) +
+  geom_col() +
+  labs(title = NULL,
+       x = NULL, y = expression("Variant sites"~"(×10"^6*")")) +
+  JFMVTheme +
+  scale_y_continuous(expand=c(0,0), limits=c(0, max(variant_classes_summed_counts$n)*1.1/1e6)) +
+  theme(legend.position = "bottom")+
+  scale_fill_manual(
+    name = NULL,
+    values = c("2 alleles"="#b96f74", "3 alleles"="#b96f7475", ">3 alleles"="#b96f7450"),
+    labels = c("2 alleles"="2 alleles", "3 alleles"="3 alleles", ">3 alleles"=">3 alleles")
+  ) -> p5
+
+p5
+
+# Save as svg
+ggsave("variant_classes_summed_counts.svg", p5, width = 11/3, height = 8/3, units = "in", dpi = 300)
+
+```
+
+```{r combine nested class}
+# The INDEL+MNV counts should be added to the INDEL counts and to the MNV counts. So they are double counted.
+sum(variant_classes_summed_counts$n)
+## INDEL & 3 alleles
+variant_classes_summed_counts$n[variant_classes_summed_counts$ClassMix=="INDEL" & variant_classes_summed_counts$ALT_Count_Group=="3 alleles"]<-variant_classes_summed_counts$n[variant_classes_summed_counts$ClassMix=="INDEL" & variant_classes_summed_counts$ALT_Count_Group=="3 alleles"]+variant_classes_summed_counts$n[variant_classes_summed_counts$ClassMix=="INDEL+MNV" & variant_classes_summed_counts$ALT_Count_Group=="3 alleles"]
+## INDEL & >3 alleles
+variant_classes_summed_counts$n[variant_classes_summed_counts$ClassMix=="INDEL" & variant_classes_summed_counts$ALT_Count_Group==">3 alleles"]<-variant_classes_summed_counts$n[variant_classes_summed_counts$ClassMix=="INDEL" & variant_classes_summed_counts$ALT_Count_Group==">3 alleles"]+variant_classes_summed_counts$n[variant_classes_summed_counts$ClassMix=="INDEL+MNV" & variant_classes_summed_counts$ALT_Count_Group==">3 alleles"]
+## MNV & 3 alleles
+variant_classes_summed_counts$n[variant_classes_summed_counts$ClassMix=="MNV" & variant_classes_summed_counts$ALT_Count_Group=="3 alleles"]<-variant_classes_summed_counts$n[variant_classes_summed_counts$ClassMix=="MNV" & variant_classes_summed_counts$ALT_Count_Group=="3 alleles"]+variant_classes_summed_counts$n[variant_classes_summed_counts$ClassMix=="INDEL+MNV" & variant_classes_summed_counts$ALT_Count_Group=="3 alleles"]
+## MNV & >3 alleles
+variant_classes_summed_counts$n[variant_classes_summed_counts$ClassMix=="MNV" & variant_classes_summed_counts$ALT_Count_Group==">3 alleles"]<-variant_classes_summed_counts$n[variant_classes_summed_counts$ClassMix=="MNV" & variant_classes_summed_counts$ALT_Count_Group==">3 alleles"]+variant_classes_summed_counts$n[variant_classes_summed_counts$ClassMix=="INDEL+MNV" & variant_classes_summed_counts$ALT_Count_Group==">3 alleles"]
+
+# Remove the INDEL+MNV counts
+variant_classes_summed_counts<-variant_classes_summed_counts[variant_classes_summed_counts$ClassMix!="INDEL+MNV",]
+
+# will be higher than the original sum because INDEL+MNV counts were added to both INDEL and MNV counts
+sum(variant_classes_summed_counts$n)
+
+# save to file for later re-plotting
+write_tsv(variant_classes_summed_counts, "variant_classes_summed_counts.tsv")
+```
+
+```{r plot combined nested class, include=TRUE, fig.width=11/3, fig.height=8/3}
+# Plot n as a function of ClassMix grouped by ALT_Count
+ggplot(variant_classes_summed_counts, aes(x = ClassMix, y = n/1e6, fill = ALT_Count_Group)) +
+  geom_col() +
+  labs(title = NULL,
+       x = NULL, y = expression("Variant sites"~"(×10"^6*")")) +
+  JFMVTheme +
+  scale_y_continuous(expand=c(0,0), limits=c(0, max(variant_classes_summed_counts$n)*1.1/1e6)) +
+  theme(legend.position = "bottom")+
+  scale_fill_manual(
+    name = NULL,
+    values = c("2 alleles"="#b96f74", "3 alleles"="#b96f7475", ">3 alleles"="#b96f7450"),
+    labels = c("2 alleles"="2 alleles", "3 alleles"="3 alleles", ">3 alleles"=">3 alleles")
+  ) -> p6
+
+p6
+
+# Save as svg
+ggsave("variant_classes_summed_counts_combined.svg", p6, width = 3.66666666667, height = 2.66666666667, units = "in", dpi = 300)
+```
+
+```{r prepare variant compositon for ternary plot}
+variant_comp <- variant_classes %>%
+  mutate(
+    pattern = str_split(VARIANT_CLASSES, ","),
+    SNV   = map_dbl(pattern, ~ sum(.x == "SNV")   / length(.x)),
+    INDEL = map_dbl(pattern, ~ sum(.x == "INDEL") / length(.x)),
+    MNV   = map_dbl(pattern, ~ sum(.x == "MNV")   / length(.x))
+  ) %>%
+  dplyr::select(SNV, INDEL, MNV, n)
+
+# for any duplicate VARIANT_CLASSES values, sum the counts
+variant_comp <- variant_comp %>%
+  group_by(SNV, INDEL, MNV) %>%
+  summarise(n = sum(n)) %>%
+  ungroup()
+
+# calculate Percent_n
+variant_comp$Percent_n<-(100*variant_comp$n/sum(variant_comp$n))
+
+# sort by Percent_n
+variant_comp <- variant_comp %>%
+  arrange(desc(Percent_n))
+
+variant_comp %>% 
+  print(n = Inf)
+```
+
+```{r summarize SITE_LABEL values}
+# Convert SITE_LABEL which is a bit-wise integer to binary {SNV: 1, INDEL: 2, COMPOSITE: 4, MNV: 8, GAP: 16}
+# So a site label of 1 mean {SNV: True, INDEL: False, COMPOSITE: False, MNV: False, GAP: False}
+# A site label of 3 means {SNV: True, INDEL: True, COMPOSITE: False, MNV: False, GAP: False}
+
+site_labels <- sites %>%
+  count(SITE_LABEL) %>%
+  arrange(desc(n)) %>%
+  mutate(
+    SITE_LABEL = factor(SITE_LABEL, levels = unique(SITE_LABEL)),
+    SITE_LABEL = fct_reorder(SITE_LABEL, n),
+    # decode each bit
+    has_SNV       = bitwAnd(as.integer(as.character(SITE_LABEL)), 1)  > 0,
+    has_INDEL     = bitwAnd(as.integer(as.character(SITE_LABEL)), 2)  > 0,
+    has_COMPOSITE = bitwAnd(as.integer(as.character(SITE_LABEL)), 4)  > 0,
+    has_MNV       = bitwAnd(as.integer(as.character(SITE_LABEL)), 8)  > 0,
+    has_GAP       = bitwAnd(as.integer(as.character(SITE_LABEL)), 16) > 0
+  )
+
+site_labels %>% 
+  print(n = Inf)
+```
+
+```{r upset-plot, include=TRUE, fig.width=11/2, fig.height=8/2}
+# Select only the logical columns + the site‐count
+upset_df <- site_labels %>%
+  dplyr::select(
+    has_SNV, has_INDEL, has_COMPOSITE, has_MNV, has_GAP, n
+  )
+
+sum(upset_df$n)
+
+# if has_INDEL is TRUE or has_COMPOSITE is TRUE, then has_INDEL should be TRUE, then remove has_COMPOSITE. This to treat COMPOSITE as INDEL
+upset_df <- upset_df %>%
+  mutate(
+    has_INDEL = ifelse(has_COMPOSITE, TRUE, has_INDEL),
+    has_COMPOSITE = NULL
+  )
+
+# duplicate rows has_SNV:has_GAP should have their n values summed and leave only one entry
+upset_df <- upset_df %>%
+  group_by(has_SNV, has_INDEL, has_MNV, has_GAP) %>%
+  summarise(n = sum(n)) %>%
+  ungroup()
+
+sum(upset_df$n)
+
+# conver 3 logical columns to a single column where has_SNV should be "S" if TRUE, and "" if FALSE. Then has_INDEL should be "I" if TRUE, and "" if FALSE. Then has_MNV should be "M" if TRUE, and "" if FALSE.
+## the resulting column should be "SIM" if all are TRUE, "SI" if has_SNV and has_INDEL are TRUE, "S" if only has_SNV is TRUE, "I" if only has_INDEL is TRUE, "M" if only has_MNV is TRUE, and "" if all are FALSE
+
+upset_df <- upset_df %>%
+  mutate(
+    ClassMix = paste0(
+      ifelse(has_SNV, "S", ""),
+      ifelse(has_INDEL, "I", ""),
+      ifelse(has_MNV, "M", "")
+    )
+  )
+
+# Order ClassMix by the order of n column (largest to smallest)
+upset_df$ClassMix <- factor(upset_df$ClassMix, 
+                             levels = unique(upset_df$ClassMix[order(upset_df$n, decreasing = TRUE)]))
+
+ggplot(upset_df, aes(x = ClassMix, y = n/1e6, fill = has_GAP)) +
+  geom_col() +
+  labs(title = "Breakdown of Variant Classes",
+       x = "Variant Class", y = expression(Sites~"(×10"^6*")")) +
+  scale_x_discrete(expand=c(0,0)) +
+  JFMVTheme +
+  scale_y_continuous(expand=c(0,0), limits=c(0, max(upset_df$n)*1.1/1e6)) +
+  theme(
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  ) +
+  # replace has_GAP with "N" and "No N"
+  scale_fill_manual(
+    name = "N present in allele",
+    values = c("TRUE" = "#D55E00", "FALSE" = "#0072B2"),
+    labels = c("TRUE" = "Yes", "FALSE" = "No")
+  ) +
+  # replace S with "SNV", I with "INDEL", and M with "MNV"
+  scale_x_discrete(
+    labels = c(
+      "S" = "SNV",
+      "I" = "INDEL",
+      "M" = "MNV",
+      "SI" = "SNV + INDEL",
+      "SM" = "SNV + MNV",
+      "IM" = "INDEL + MNV",
+      "SIM" = "SNV + INDEL + MNV"
+    )
+  ) +
+  theme(legend.position = "bottom") +
+  # add repelled text labels with percentage
+  ggrepel::geom_text_repel(
+    aes(label = round(n/1e6,3) ),
+    size = 3,
+    nudge_x = 0.25,
+    nudge_y = 1.5,
+    segment.size = 0.2,
+    show.legend = FALSE
+  ) -> p7
+
+p7
+
+# Save as svg
+ggsave("breakdown_count_of_class_and_gapped.svg", p7, width = 11/2, height = 8/2, units = "in", dpi = 300)
+
+# Spread the has_GAP column to columns
+upset_df_wide <- upset_df %>%
+  mutate(
+    has_GAP = ifelse(has_GAP, "Yes", "No")
+  ) %>%
+  pivot_wider(
+    names_from = has_GAP,
+    values_from = n,
+    values_fill = 0
+  )
+
+# Calculate percentage of GAP
+upset_df_wide <- upset_df_wide %>%
+  mutate(
+    Gapped = Yes / (Yes + No) * 100
+  )
+
+# Calculate percentage of NotGAP
+upset_df_wide$NotGapped <- 100-upset_df_wide$Gapped
+
+# Gather the data back to long format
+upset_df_long <- upset_df_wide %>%
+  pivot_longer(
+    cols = c(Gapped, NotGapped),
+    names_to = "GAP",
+    values_to = "Percent"
+  )
+
+
+upset_df_long$GAP<-factor(upset_df_long$GAP, levels = c("NotGapped", "Gapped"), order=TRUE)
+
+# Plot: upset plot with Gapped and NotGapped
+ggplot(upset_df_long, aes(x = ClassMix, y = Percent, fill = GAP)) +
+  geom_col() +
+  labs(title = "Breakdown of Variant Classes",
+       x = "Variant Class", y = "%Loci with Ns") +
+  scale_x_discrete(expand=c(0,0)) +
+  JFMVTheme +
+  scale_y_continuous(expand=c(0,0), limits=c(0, 100)) +
+  theme(
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  ) +
+  theme(legend.position = "bottom") +
+  # replace has_GAP with "N" and "No N"
+  scale_fill_manual(
+    name = "N present in allele",
+    values = c("Gapped" = "#D55E00", "NotGapped" = "#0072B2"),
+    labels = c("Gapped" = "Yes", "NotGapped" = "No")
+  ) +
+  # replace S with "SNV", I with "INDEL", and M with "MNV"
+  scale_x_discrete(
+    labels = c(
+      "S"   = "SNV",
+      "I"   = "INDEL",
+      "M"   = "MNV",
+      "SI"  = "SNV + INDEL",
+      "SM"  = "SNV + MNV",
+      "IM"  = "INDEL + MNV",
+      "SIM" = "SNV + INDEL + MNV"
+    )
+  ) +
+  # add repelled text labels with percentage
+  ggrepel::geom_text_repel(
+    aes(label = paste0(round(Percent, 2), "%")),
+    size = 3,
+    nudge_x = 0,
+    nudge_y = 0,
+    segment.size = 0.2,
+    show.legend = FALSE
+  ) -> p8
+
+p8
+
+# Save as svg
+ggsave("breakdown_percent_of_class_and_gapped.svg", p8, width = 11/2, height = 8/2, units = "in", dpi = 300)
+```
+
+```{r load site exploded data}
+# Load exploded per‐site stats
+exploded_sites <- read_tsv("DMP.full.vcf.exploded.tsv")
+
+exploded_sites<-exploded_sites[,-4]
+
+colnames(exploded_sites)[1]<-"CHROM"
+```
+
+```{r How many sites}
+# Total number of sites
+n_exploded_sites <- nrow(exploded_sites)
+message("Total exploded sites: ", n_exploded_sites)
+
+# Number of sites per chromosome
+exploded_sites_per_chr <- exploded_sites %>% 
+  count(CHROM, name = "n_exploded_sites") %>% 
+  arrange(desc(n_exploded_sites))
+
+print(exploded_sites_per_chr) %>% 
+  print(n = Inf)
+
+# Add a column with whether the site has a gap or not
+exploded_sites$GAP<-exploded_sites$ALT_NS>0
+
+# Replace the NA in N_EQUIV with "No Gap"
+exploded_sites$N_EQUIV[is.na(exploded_sites$N_EQUIV)]<-"No Gap"
+# Replace True with "Equivalent gap"
+exploded_sites$N_EQUIV[exploded_sites$N_EQUIV=="True"]<-"Equivalent"
+# Replace False with "Not equivalent gap"
+exploded_sites$N_EQUIV[exploded_sites$N_EQUIV=="False"]<-"Not equivalent"
+
+# What fraction of sites have a gap?
+exploded_sites %>%
+  group_by(GAP) %>%
+  summarise(n = n()) %>%
+  mutate(Percent = n / sum(n) * 100) %>%
+  ungroup() -> gap_summary
+
+gap_summary %>% 
+  print(n = Inf)
+
+# What fraction of gapped sites could be equivalent to other segments if treated as wildcard?
+exploded_sites %>%
+  group_by(N_EQUIV) %>%
+  summarise(n = n()) %>%
+  mutate(Percent = n / sum(n) * 100) %>%
+  ungroup() -> gap_equivalence_summary
+
+gap_equivalence_summary %>% 
+  print(n = Inf)
+```
+
+```{r plot gap equivalence, include=TRUE, fig.width=11/2, fig.height=8/2}
+ggplot(gap_equivalence_summary, aes(x = N_EQUIV, y = Percent)) +
+  geom_col(fill = "#0072B2") +
+  labs(title = "Gap Equivalence",
+       x = "Gap Equivalence", y = "% Alleles") +
+  scale_x_discrete(expand=c(0,0)) +
+  JFMVTheme +
+  scale_y_continuous(expand=c(0,0), limits=c(0, max(gap_equivalence_summary$Percent)*1.1)) +
+  theme(
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  ) +
+  ggrepel::geom_text_repel(
+    aes(label = paste0(round(Percent, 2), "%")),
+    size = 3,
+    nudge_x = 0.25,
+    nudge_y = 4,
+    segment.size = 0.2,
+    show.legend = FALSE
+  ) -> p9
+
+p9
+
+# Save as svg
+ggsave("gap_equivalence.svg", p9, width = 11/2, height = 8/2, units = "in", dpi = 300)
+```
+
+```{r simple-ternary, include=TRUE, fig.width=11/2, fig.height=8/2}
+library(ggtern)
+library(scales)
+
+ggtern(variant_comp, 
+       aes(x = SNV, y = INDEL, z = MNV, 
+           size  = n,     # point‐size in millions
+           color = n)) +      # map color to the raw counts
+  geom_point(alpha = 1, stroke=0) +
+  # viridis color scale with log2 transformation
+  scale_color_viridis_c(
+    name      = "Sites (log2)", 
+    trans     = "log2",
+    labels    = label_number(scale = 1),
+    end=0.8,
+    begin=0.1,
+    option="turbo"
+  ) +
+    scale_size(
+    name      = "Sites",
+    range = c(1, 6),
+    labels    = label_number(scale = 1)
+  ) +
+  labs(
+    x     = "SNV",
+    y     = "INDEL",
+    z     = "MNV"
+    ) +
+  theme_minimal()
+
+```

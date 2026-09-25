@@ -1,0 +1,431 @@
+---
+title: "Calculate alignment accuracy"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+set.seed(0)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Alignment_Benchmarking/Mapping_Accuracy_Analysis/"))
+
+library(ggplot2)
+library(cowplot)
+library(scales)
+library("dplyr")
+library(factoextra)
+library(tidyr)
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+library(ggrepel)
+library(ggbeeswarm)
+library(data.table)
+```
+
+```{r load mm10 data}
+# Load data
+data_mm10 <- fread("Combined_saturation_metrics.txt")
+
+head(data_mm10)
+```
+```{r}
+library(data.table)
+
+setDT(data_mm10)
+
+overall_fate <- data_mm10[
+    ,
+    .(
+        total_reads    = sum(total, na.rm = TRUE),
+        unmapped_reads = sum(unmapped, na.rm = TRUE),
+        lifted_reads   = sum(lifted, na.rm = TRUE),
+        accurate_reads = sum(accurate, na.rm = TRUE)
+    ),
+    by = .(run_dir, pair_name, subsample_label, subsample_percent, rg)
+]
+
+overall_fate[
+    ,
+    `:=`(
+        mapped_reads            = total_reads - unmapped_reads,
+        mapped_unliftable_reads = (total_reads - unmapped_reads) - lifted_reads,
+        lifted_inaccurate_reads = lifted_reads - accurate_reads,
+        lifted_accurate_reads   = accurate_reads
+    )
+]
+
+overall_fate[
+    ,
+    `:=`(
+        unmapped_pct            = 100 * unmapped_reads / total_reads,
+        mapped_unliftable_pct   = 100 * mapped_unliftable_reads / total_reads,
+        lifted_inaccurate_pct   = 100 * lifted_inaccurate_reads / total_reads,
+        lifted_accurate_pct     = 100 * lifted_accurate_reads / total_reads,
+        lifted_pct              = 100 * lifted_reads / total_reads,
+        accurate_pct            = 100 * accurate_reads / total_reads,
+        accurate_given_lifted_pct = fifelse(
+            lifted_reads > 0,
+            100 * accurate_reads / lifted_reads,
+            NA_real_
+        )
+    )
+]
+```
+
+```{r}
+mapq_summary <- data_mm10[
+    !is.na(mapq_bin),
+    .(
+        total_reads    = sum(total, na.rm = TRUE),
+        lifted_reads   = sum(lifted, na.rm = TRUE),
+        accurate_reads = sum(accurate, na.rm = TRUE)
+    ),
+    by = .(run_dir, pair_name, subsample_label, subsample_percent, rg, mapq_bin)
+]
+
+mapq_summary[
+    ,
+    `:=`(
+        unliftable_reads = total_reads - lifted_reads,
+        inaccurate_reads = lifted_reads - accurate_reads
+    )
+]
+
+mapq_summary[
+    ,
+    `:=`(
+        lifted_within_bin_pct = 100 * lifted_reads / total_reads,
+        unliftable_within_bin_pct = 100 * unliftable_reads / total_reads,
+        accurate_within_bin_pct = 100 * accurate_reads / total_reads,
+        accurate_given_lifted_within_bin_pct = fifelse(
+            lifted_reads > 0,
+            100 * accurate_reads / lifted_reads,
+            NA_real_
+        )
+    )
+]
+```
+
+```{r}
+mapq_levels <- c("0", "1-9", "10-29", "30-59", "60")
+
+mapq_summary[
+    ,
+    mapq_bin := factor(mapq_bin, levels = mapq_levels, ordered = TRUE)
+]
+
+overall_fate[
+    ,
+    fate_sum := unmapped_pct + mapped_unliftable_pct + lifted_inaccurate_pct + lifted_accurate_pct
+]
+
+summary(overall_fate$fate_sum)
+
+overall_fate[
+    ,
+    subsample_percent := as.numeric(subsample_percent)
+]
+
+mapq_summary[
+    ,
+    subsample_percent := as.numeric(subsample_percent)
+]
+
+setorder(overall_fate, rg, subsample_percent)
+setorder(mapq_summary, rg, mapq_bin, subsample_percent)
+```
+
+
+```{r}
+overall_fate_long <- melt(
+    overall_fate,
+    id.vars = c("run_dir", "pair_name", "subsample_label", "subsample_percent", "rg"),
+    measure.vars = c(
+        "unmapped_pct",
+        "mapped_unliftable_pct",
+        "lifted_inaccurate_pct",
+        "lifted_accurate_pct"
+    ),
+    variable.name = "fate",
+    value.name = "pct"
+)
+
+overall_fate_long[
+    ,
+    fate := factor(
+        fate,
+        levels = c(
+            "unmapped_pct",
+            "mapped_unliftable_pct",
+            "lifted_inaccurate_pct",
+            "lifted_accurate_pct"
+        ),
+        labels = c(
+            "Unmapped",
+            "Mapped, unliftable",
+            "Lifted, inaccurate",
+            "Lifted, accurate"
+        )
+    )
+]
+
+setorder(overall_fate_long, rg, fate, subsample_percent)
+```
+
+```{r}
+ggplot(
+    overall_fate_long,
+    aes(
+        x = subsample_percent,
+        y = pct,
+        group = rg
+    )
+) +
+    geom_line(alpha = 0.30, linewidth = 0.3) +
+    geom_point(alpha = 0.45, size = 0.8) +
+    facet_wrap(~ fate, ncol = 2, scales = "free_y") +
+    scale_x_continuous(
+        breaks = sort(unique(overall_fate_long$subsample_percent))
+    ) +
+    scale_y_continuous(
+        labels = percent_format(scale = 1)
+    ) +
+    labs(
+        x = "Subsample (%)",
+        y = "Reads (%)",
+        title = "Read fate across subsampling"
+    ) +
+    theme_cowplot() +
+    JFMVTheme
+```
+
+```{r}
+ggplot(
+    mapq_summary,
+    aes(
+        x = subsample_percent,
+        y = lifted_within_bin_pct,
+        group = rg
+    )
+) +
+    geom_line(alpha = 0.30, linewidth = 0.3) +
+    geom_point(alpha = 0.45, size = 0.8) +
+    facet_wrap(~ mapq_bin, nrow = 2) +
+    scale_x_continuous(
+        breaks = sort(unique(mapq_summary$subsample_percent))
+    ) +
+    scale_y_continuous(
+        labels = percent_format(scale = 1),
+        limits = c(0, 100)
+    ) +
+    labs(
+        x = "Subsample (%)",
+        y = "Lifted within MAPQ bin (%)",
+        title = "Liftability across subsampling by MAPQ bin"
+    ) +
+    theme_cowplot() +
+    JFMVTheme
+
+```
+
+```{r}
+ggplot(
+    mapq_summary,
+    aes(
+        x = subsample_percent,
+        y = accurate_given_lifted_within_bin_pct,
+        group = rg
+    )
+) +
+    geom_line(alpha = 0.30, linewidth = 0.3) +
+    geom_point(alpha = 0.45, size = 0.8) +
+    facet_wrap(~ mapq_bin, nrow = 1) +
+    scale_x_continuous(
+        breaks = sort(unique(mapq_summary$subsample_percent))
+    ) +
+    scale_y_continuous(
+        labels = percent_format(scale = 1),
+        limits = c(0, 100)
+    ) +
+    labs(
+        x = "Subsample (%)",
+        y = "Accurate among lifted (%)",
+        title = "Accuracy across subsampling by MAPQ bin"
+    ) +
+    theme_cowplot() +
+    JFMVTheme
+```
+
+```{r}
+overall_fate_2pct <- overall_fate[subsample_percent == 2]
+overall_fate_long_2pct <- overall_fate_long[subsample_percent == 2]
+mapq_summary_2pct <- mapq_summary[subsample_percent == 2]
+
+rg_order <- overall_fate_2pct[order(lifted_accurate_pct), rg]
+
+overall_fate_2pct[
+    ,
+    rg := factor(rg, levels = rg_order)
+]
+
+overall_fate_long_2pct[
+    ,
+    rg := factor(rg, levels = rg_order)
+]
+
+mapq_summary_2pct[
+    ,
+    rg := factor(rg, levels = rg_order)
+]
+```
+
+```{r}
+ggplot(
+    overall_fate_long_2pct,
+    aes(
+        x = rg,
+        y = pct,
+        fill = fate
+    )
+) +
+    geom_col(width = 0.85) +
+    coord_flip() +
+    scale_y_continuous(
+        labels = percent_format(scale = 1),
+        limits = c(0, 100)
+    ) +
+    labs(
+        x = NULL,
+        y = "Reads (%)",
+        fill = "Outcome",
+        title = "Read fate at 2% subsampling"
+    ) +
+    theme_cowplot() +
+    JFMVTheme
+```
+
+```{r}
+ggplot(
+    mapq_summary_2pct,
+    aes(
+        x = mapq_bin,
+        y = lifted_within_bin_pct,
+        group = rg
+    )
+) +
+    geom_line(alpha = 0.30, linewidth = 0.3) +
+    geom_point(alpha = 0.50, size = 1) +
+    scale_y_continuous(
+        labels = percent_format(scale = 1),
+        limits = c(0, 100)
+    ) +
+    labs(
+        x = "MAPQ bin",
+        y = "Lifted within MAPQ bin (%)",
+        title = "Liftability by MAPQ bin at 2% subsampling"
+    ) +
+    theme_cowplot() +
+    JFMVTheme
+```
+
+```{r}
+ggplot(
+    mapq_summary_2pct,
+    aes(
+        x = mapq_bin,
+        y = accurate_given_lifted_within_bin_pct,
+        group = rg
+    )
+) +
+    geom_line(alpha = 0.30, linewidth = 0.3) +
+    geom_point(alpha = 0.50, size = 1) +
+    scale_y_continuous(
+        labels = percent_format(scale = 1),
+        limits = c(0, 100)
+    ) +
+    labs(
+        x = "MAPQ bin",
+        y = "Accurate among lifted (%)",
+        title = "Accuracy by MAPQ bin at 2% subsampling"
+    ) +
+    theme_cowplot() +
+    JFMVTheme
+```
+
+```{r}
+ggplot(
+    mapq_summary_2pct,
+    aes(
+        x = mapq_bin,
+        y = accurate_within_bin_pct,
+        group = rg
+    )
+) +
+    geom_line(alpha = 0.30, linewidth = 0.3) +
+    geom_point(alpha = 0.50, size = 1) +
+    scale_y_continuous(
+        labels = percent_format(scale = 1),
+        limits = c(0, 100)
+    ) +
+    labs(
+        x = "MAPQ bin",
+        y = "Accurate within MAPQ bin (%)",
+        title = "Overall accuracy by MAPQ bin at 2% subsampling"
+    ) +
+    theme_cowplot() +
+    JFMVTheme
+```
+
+```{r}
+ggplot(
+    mapq_summary_2pct,
+    aes(
+        x = mapq_bin,
+        y = lifted_within_bin_pct
+    )
+) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_quasirandom(width = 0.15, alpha = 0.60, size = 1) +
+    scale_y_continuous(
+        labels = percent_format(scale = 1),
+        limits = c(0, 100)
+    ) +
+    labs(
+        x = "MAPQ bin",
+        y = "Lifted within MAPQ bin (%)",
+        title = "Liftability by MAPQ bin at 2% subsampling"
+    ) +
+    theme_cowplot() +
+    JFMVTheme
+
+ggplot(
+    mapq_summary_2pct,
+    aes(
+        x = mapq_bin,
+        y = accurate_given_lifted_within_bin_pct
+    )
+) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_quasirandom(width = 0.15, alpha = 0.60, size = 1) +
+    scale_y_continuous(
+        labels = percent_format(scale = 1),
+        limits = c(0, 100)
+    ) +
+    labs(
+        x = "MAPQ bin",
+        y = "Accurate among lifted (%)",
+        title = "Accuracy by MAPQ bin at 2% subsampling"
+    ) +
+    theme_cowplot() +
+    JFMVTheme
+```

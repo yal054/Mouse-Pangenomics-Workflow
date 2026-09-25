@@ -1,0 +1,473 @@
+---
+title: "Perform exploratory analysis of QC metrics"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Variant_Calling_Benchmark/"))
+set.seed(0)
+
+require("ggplot2")
+require("cowplot")
+require("viridis")
+require("reshape2")
+require("dplyr")
+require("tidyverse")
+library(plotly)
+library(Rtsne)
+library(stringr)
+library(ggbeeswarm)
+
+library(DSS)
+
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+
+theme_set(theme_cowplot())
+
+library(data.table)
+```
+
+```{r import metrics}
+fread("deepvariant_qc_metrics/deepvariant_qc.dp_counts.tsv") -> dp_counts
+fread("deepvariant_qc_metrics/deepvariant_qc.gq_counts.tsv") -> gq_counts
+fread("deepvariant_qc_metrics/deepvariant_qc.vaf_bins.tsv") -> vaf_bins
+fread("deepvariant_qc_metrics/deepvariant_qc.filter_counts.tsv") -> filter_counts
+fread("deepvariant_qc_metrics/deepvariant_qc.sample_summary.tsv") -> sample_summary
+
+dp_counts$method <- str_replace(dp_counts$method, "Founders-surjected-chr-sort", "Pangenome")
+gq_counts$method <- str_replace(gq_counts$method, "Founders-surjected-chr-sort", "Pangenome")
+vaf_bins$method <- str_replace(vaf_bins$method, "Founders-surjected-chr-sort", "Pangenome")
+filter_counts$method <- str_replace(filter_counts$method, "Founders-surjected-chr-sort", "Pangenome")
+sample_summary$method <- str_replace(sample_summary$method, "Founders-surjected-chr-sort", "Pangenome")
+
+dp_counts <- merge(
+  dp_counts,
+  sample_summary[, .(sample, method, median_dp)],
+  by = c("sample", "method"),
+  all.x = TRUE
+)
+
+dp_counts[, normalized_dp := dp / median_dp]
+```
+
+```{r}
+# define metric thresholds
+gq_threshold <- 20
+normalized_dp_threshold_lower <- 0.5
+normalized_dp_threshold_upper <- 1.5
+vaf_threshold <- 0.3
+```
+
+```{r visualize metric distributions, fig.width=4, fig.height=4}
+
+
+filter_counts[, sample := factor(sample)]
+filter_counts[, method := factor(method)]
+filter_counts[, filter := factor(filter)]
+
+gq_counts[, sample := factor(sample)]
+gq_counts[, method := factor(method)]
+
+dp_counts[, sample := factor(sample)]
+dp_counts[, method := factor(method)]
+
+vaf_bins[, sample := factor(sample)]
+vaf_bins[, method := factor(method)]
+
+method_colors <- c(
+  "bwa" = "#0072B2",
+  "Pangenome" = "#D55E00"
+)
+
+gq_bin_width <- 1
+dp_bin_width <- 2
+normalized_dp_bin_width <- 0.075
+vaf_bin_width <- 0.04
+
+filter_plot_dt <- filter_counts[, .(count = sum(count)), by = .(method, filter)]
+
+gq_plot_dt <- copy(gq_counts)
+gq_plot_dt[gq >= 60, gq := 60]
+gq_plot_dt[, gq_bin := floor(gq / gq_bin_width) * gq_bin_width]
+gq_plot_dt[gq_bin >= 60, gq_bin := 60]
+gq_plot_dt <- gq_plot_dt[, .(count = sum(count)), by = .(method, gq_bin)]
+
+dp_plot_dt <- copy(dp_counts)
+dp_plot_dt[dp >= 120, dp := 120]
+dp_plot_dt[, dp_bin := floor(dp / dp_bin_width) * dp_bin_width]
+dp_plot_dt[dp_bin >= 120, dp_bin := 120]
+dp_plot_dt <- dp_plot_dt[, .(count = sum(count)), by = .(method, dp_bin)]
+
+dpNormalized_plot_dt <- copy(dp_counts)
+dpNormalized_plot_dt[normalized_dp >= 4, normalized_dp := 4]
+dpNormalized_plot_dt[, normalized_dp_bin := floor(normalized_dp / normalized_dp_bin_width) * normalized_dp_bin_width]
+dpNormalized_plot_dt[normalized_dp_bin >= 4, normalized_dp_bin := 4]
+dpNormalized_plot_dt <- dpNormalized_plot_dt[, .(count = sum(count)), by = .(method, normalized_dp_bin)]
+
+vaf_plot_dt <- copy(vaf_bins)
+vaf_plot_dt[bin_mid >= 1, bin_mid := 1]
+vaf_plot_dt[, vaf_bin := floor(bin_mid / vaf_bin_width) * vaf_bin_width]
+vaf_plot_dt[vaf_bin >= 1, vaf_bin := 1]
+vaf_plot_dt <- vaf_plot_dt[, .(count = sum(count)), by = .(method, vaf_bin)]
+
+p_filter <- ggplot(filter_plot_dt, aes(x = filter, y = count/1e6, fill = method)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = method_colors) +
+  xlab("FILTER") +
+  ylab("Count (millions)") +
+  ggtitle("FILTER counts") +
+  theme(legend.position = "bottom") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+
+p_filter
+
+p_gq <- ggplot(gq_plot_dt, aes(x = gq_bin, y = count/1e6, fill = method)) +
+  geom_col(position = "identity", alpha = 0.45, width = gq_bin_width) +
+  scale_fill_manual(values = method_colors) +
+  xlab("GQ (60 = >=60)") +
+  ylab("Count (millions)") +
+  ggtitle("GQ distribution") +
+  theme(legend.position = "bottom") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  geom_vline(xintercept = gq_threshold, linetype = "dashed", color = "black")
+
+p_gq
+
+p_dp <- ggplot(dp_plot_dt, aes(x = dp_bin, y = count/1e6, fill = method)) +
+  geom_col(position = "identity", alpha = 0.45, width = dp_bin_width) +
+  scale_fill_manual(values = method_colors) +
+  xlab("DP (120 = >=120)") +
+  ylab("Count (millions)") +
+  ggtitle("DP distribution") +
+  theme(legend.position = "bottom") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+
+p_dp
+
+p_dpNormalized <- ggplot(dpNormalized_plot_dt, aes(x = normalized_dp_bin, y = count/1e6, fill = method)) +
+  geom_col(position = "identity", alpha = 0.45, width = normalized_dp_bin_width) +
+  scale_fill_manual(values = method_colors) +
+  xlab("Normalized DP (4 = >=4)") +
+  ylab("Count (millions)") +
+  ggtitle("Normalized DP distribution") +
+  theme(legend.position = "bottom") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  geom_vline(xintercept = normalized_dp_threshold_lower, linetype = "dashed", color = "black") +
+  geom_vline(xintercept = normalized_dp_threshold_upper, linetype = "dashed", color = "black")
+
+p_dpNormalized
+
+p_vaf <- ggplot(vaf_plot_dt, aes(x = vaf_bin, y = count/1e6, fill = method)) +
+  geom_col(position = "identity", alpha = 0.45, width = vaf_bin_width) +
+  scale_fill_manual(values = method_colors) +
+  xlab("VAF") +
+  ylab("Count (millions)") +
+  ggtitle("VAF distribution") +
+  theme(legend.position = "bottom") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  geom_vline(xintercept = vaf_threshold, linetype = "dashed", color = "black")
+
+p_vaf
+```
+
+```{r visualize metric distributions with overlap, fig.width=4, fig.height=4}
+
+filter_counts[, sample := factor(sample)]
+filter_counts[, method := factor(method)]
+filter_counts[, filter := factor(filter)]
+
+gq_counts[, sample := factor(sample)]
+gq_counts[, method := factor(method)]
+
+dp_counts[, sample := factor(sample)]
+dp_counts[, method := factor(method)]
+
+vaf_bins[, sample := factor(sample)]
+vaf_bins[, method := factor(method)]
+
+component_colors <- c(
+  "overlap" = "grey75",
+  "bwa" = "#0072B2",
+  "Pangenome" = "#D55E00"
+)
+
+gq_bin_width <- 1
+dp_bin_width <- 2
+normalized_dp_bin_width <- 0.075
+vaf_bin_width <- 0.04
+
+filter_plot_dt <- filter_counts[, .(count = sum(count)), by = .(filter, method)]
+filter_plot_dt <- dcast(filter_plot_dt, filter ~ method, value.var = "count", fill = 0)
+
+if (!"bwa" %in% names(filter_plot_dt)) {
+  filter_plot_dt[, bwa := 0]
+}
+if (!"Pangenome" %in% names(filter_plot_dt)) {
+  filter_plot_dt[, Pangenome := 0]
+}
+
+filter_plot_dt[, overlap := pmin(bwa, Pangenome)]
+filter_plot_dt[, bwa := pmax(bwa - Pangenome, 0)]
+filter_plot_dt[, Pangenome := pmax(Pangenome - overlap, 0)]
+
+filter_plot_dt <- melt(
+  filter_plot_dt,
+  id.vars = "filter",
+  measure.vars = c("overlap", "bwa", "Pangenome"),
+  variable.name = "component",
+  value.name = "count"
+)
+
+filter_plot_dt[, component := factor(component, levels = c("overlap", "bwa", "Pangenome"))]
+
+gq_plot_dt <- copy(gq_counts)
+gq_plot_dt[gq >= 60, gq := 60]
+gq_plot_dt[, gq_bin := floor(gq / gq_bin_width) * gq_bin_width]
+gq_plot_dt[gq_bin >= 60, gq_bin := 60]
+gq_plot_dt <- gq_plot_dt[, .(count = sum(count)), by = .(gq_bin, method)]
+gq_plot_dt <- dcast(gq_plot_dt, gq_bin ~ method, value.var = "count", fill = 0)
+
+if (!"bwa" %in% names(gq_plot_dt)) {
+  gq_plot_dt[, bwa := 0]
+}
+if (!"Pangenome" %in% names(gq_plot_dt)) {
+  gq_plot_dt[, Pangenome := 0]
+}
+
+gq_plot_dt[, overlap := pmin(bwa, Pangenome)]
+gq_plot_dt[, bwa := pmax(bwa - Pangenome, 0)]
+gq_plot_dt[, Pangenome := pmax(Pangenome - overlap, 0)]
+
+gq_plot_dt <- melt(
+  gq_plot_dt,
+  id.vars = "gq_bin",
+  measure.vars = c("overlap", "bwa", "Pangenome"),
+  variable.name = "component",
+  value.name = "count"
+)
+
+gq_plot_dt[, component := factor(component, levels = c("overlap", "bwa", "Pangenome"))]
+
+dp_plot_dt <- copy(dp_counts)
+dp_plot_dt[dp >= 120, dp := 120]
+dp_plot_dt[, dp_bin := floor(dp / dp_bin_width) * dp_bin_width]
+dp_plot_dt[dp_bin >= 120, dp_bin := 120]
+dp_plot_dt <- dp_plot_dt[, .(count = sum(count)), by = .(dp_bin, method)]
+dp_plot_dt <- dcast(dp_plot_dt, dp_bin ~ method, value.var = "count", fill = 0)
+
+if (!"bwa" %in% names(dp_plot_dt)) {
+  dp_plot_dt[, bwa := 0]
+}
+if (!"Pangenome" %in% names(dp_plot_dt)) {
+  dp_plot_dt[, Pangenome := 0]
+}
+
+dp_plot_dt[, overlap := pmin(bwa, Pangenome)]
+dp_plot_dt[, bwa := pmax(bwa - Pangenome, 0)]
+dp_plot_dt[, Pangenome := pmax(Pangenome - overlap, 0)]
+
+dp_plot_dt <- melt(
+  dp_plot_dt,
+  id.vars = "dp_bin",
+  measure.vars = c("overlap", "bwa", "Pangenome"),
+  variable.name = "component",
+  value.name = "count"
+)
+
+dp_plot_dt[, component := factor(component, levels = c("overlap", "bwa", "Pangenome"))]
+
+dpNormalized_plot_dt <- copy(dp_counts)
+dpNormalized_plot_dt[normalized_dp >= 4, normalized_dp := 4]
+dpNormalized_plot_dt[, normalized_dp_bin := floor(normalized_dp / normalized_dp_bin_width) * normalized_dp_bin_width]
+dpNormalized_plot_dt[normalized_dp_bin >= 4, normalized_dp_bin := 4]
+dpNormalized_plot_dt <- dpNormalized_plot_dt[, .(count = sum(count)), by = .(normalized_dp_bin, method)]
+dpNormalized_plot_dt <- dcast(dpNormalized_plot_dt, normalized_dp_bin ~ method, value.var = "count", fill = 0)
+
+if (!"bwa" %in% names(dpNormalized_plot_dt)) {
+  dpNormalized_plot_dt[, bwa := 0]
+}
+if (!"Pangenome" %in% names(dpNormalized_plot_dt)) {
+  dpNormalized_plot_dt[, Pangenome := 0]
+}
+
+dpNormalized_plot_dt[, overlap := pmin(bwa, Pangenome)]
+dpNormalized_plot_dt[, bwa := pmax(bwa - Pangenome, 0)]
+dpNormalized_plot_dt[, Pangenome := pmax(Pangenome - overlap, 0)]
+
+dpNormalized_plot_dt <- melt(
+  dpNormalized_plot_dt,
+  id.vars = "normalized_dp_bin",
+  measure.vars = c("overlap", "bwa", "Pangenome"),
+  variable.name = "component",
+  value.name = "count"
+)
+
+dpNormalized_plot_dt[, component := factor(component, levels = c("overlap", "bwa", "Pangenome"))]
+
+vaf_plot_dt <- copy(vaf_bins)
+vaf_plot_dt[bin_mid >= 1, bin_mid := 1]
+vaf_plot_dt[, vaf_bin := floor(bin_mid / vaf_bin_width) * vaf_bin_width]
+vaf_plot_dt[vaf_bin >= 1, vaf_bin := 1]
+vaf_plot_dt <- vaf_plot_dt[, .(count = sum(count)), by = .(vaf_bin, method)]
+vaf_plot_dt <- dcast(vaf_plot_dt, vaf_bin ~ method, value.var = "count", fill = 0)
+
+if (!"bwa" %in% names(vaf_plot_dt)) {
+  vaf_plot_dt[, bwa := 0]
+}
+if (!"Pangenome" %in% names(vaf_plot_dt)) {
+  vaf_plot_dt[, Pangenome := 0]
+}
+
+vaf_plot_dt[, overlap := pmin(bwa, Pangenome)]
+vaf_plot_dt[, bwa := pmax(bwa - Pangenome, 0)]
+vaf_plot_dt[, Pangenome := pmax(Pangenome - overlap, 0)]
+
+vaf_plot_dt <- melt(
+  vaf_plot_dt,
+  id.vars = "vaf_bin",
+  measure.vars = c("overlap", "bwa", "Pangenome"),
+  variable.name = "component",
+  value.name = "count"
+)
+
+vaf_plot_dt[, component := factor(component, levels = c("overlap", "bwa", "Pangenome"))]
+
+p_filter <- ggplot(filter_plot_dt, aes(x = filter, y = count/1e6, fill = component)) +
+  geom_col(position = position_stack(reverse = TRUE)) +
+  scale_fill_manual(values = component_colors) +
+  xlab("FILTER") +
+  ylab("Count (millions)") +
+  ggtitle("FILTER counts") +
+  theme(legend.position = "bottom") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+
+p_filter
+
+p_gq <- ggplot(gq_plot_dt, aes(x = gq_bin, y = count/1e6, fill = component)) +
+  geom_col(width = gq_bin_width, position = position_stack(reverse = TRUE)) +
+  scale_fill_manual(values = component_colors) +
+  xlab("GQ (60 = >=60)") +
+  ylab("Count (millions)") +
+  ggtitle("GQ distribution") +
+  theme(legend.position = "bottom") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  geom_vline(xintercept = gq_threshold, linetype = "dashed", color = "black")
+
+p_gq
+
+p_dp <- ggplot(dp_plot_dt, aes(x = dp_bin, y = count/1e6, fill = component)) +
+  geom_col(width = dp_bin_width, position = position_stack(reverse = TRUE)) +
+  scale_fill_manual(values = component_colors) +
+  xlab("DP (120 = >=120)") +
+  ylab("Count (millions)") +
+  ggtitle("DP distribution") +
+  theme(legend.position = "bottom") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+
+p_dp
+
+p_dpNormalized <- ggplot(dpNormalized_plot_dt, aes(x = normalized_dp_bin, y = count/1e6, fill = component)) +
+  geom_col(width = normalized_dp_bin_width, position = position_stack(reverse = TRUE)) +
+  scale_fill_manual(values = component_colors) +
+  xlab("Normalized DP (4 = >=4)") +
+  ylab("Count (millions)") +
+  ggtitle("Normalized DP distribution") +
+  theme(legend.position = "bottom") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  geom_vline(xintercept = normalized_dp_threshold_lower, linetype = "dashed", color = "black") +
+  geom_vline(xintercept = normalized_dp_threshold_upper, linetype = "dashed", color = "black")
+
+p_dpNormalized
+
+p_vaf <- ggplot(vaf_plot_dt, aes(x = vaf_bin, y = count/1e6, fill = component)) +
+  geom_col(width = vaf_bin_width, position = position_stack(reverse = TRUE)) +
+  scale_fill_manual(values = component_colors) +
+  xlab("VAF") +
+  ylab("Count (millions)") +
+  ggtitle("VAF distribution") +
+  theme(legend.position = "bottom") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  geom_vline(xintercept = vaf_threshold, linetype = "dashed", color = "black")
+
+p_vaf
+
+# save as svg all plots
+ggsave("deepvariant_qc_metrics/filter_counts.svg", p_filter, width = 4, height = 4)
+ggsave("deepvariant_qc_metrics/gq_distribution.svg", p_gq, width = 4, height = 4)
+ggsave("deepvariant_qc_metrics/dp_distribution.svg", p_dp, width = 4, height = 4)
+ggsave("deepvariant_qc_metrics/normalized_dp_distribution.svg", p_dpNormalized, width = 4, height = 4)
+ggsave("deepvariant_qc_metrics/vaf_distribution.svg", p_vaf, width = 4, height = 4)
+```
+
+```{r visualize per-sample summary metrics, fig.width=5, fig.height=5}
+sample_summary[, sample := factor(sample)]
+sample_summary[, method := factor(method, levels = c("bwa", "Pangenome"))]
+
+method_colors <- c(
+  "bwa" = "#0072B2",
+  "Pangenome" = "#D55E00"
+)
+
+sample_summary_plot_dt <- melt(
+  sample_summary[, .(
+    sample,
+    method,
+    n_sites,
+    median_gq,
+    median_dp,
+    approx_median_vaf,
+    pass_fraction,
+    refcall_fraction
+  )],
+  id.vars = c("sample", "method"),
+  variable.name = "metric",
+  value.name = "value"
+)
+
+sample_summary_plot_dt[, metric := factor(
+  metric,
+  levels = c(
+    "n_sites",
+    "median_gq",
+    "median_dp",
+    "approx_median_vaf",
+    "pass_fraction",
+    "refcall_fraction"
+  )
+)]
+
+p_sample_summary <- ggplot(sample_summary_plot_dt, aes(x = method, y = value, group = sample, color = method)) +
+  geom_line(color = "grey70", alpha = 0.8) +
+  geom_point(size = 1.5) +
+  scale_color_manual(values = method_colors) +
+  facet_wrap(~ metric, scales = "free_y", ncol = 2) +
+  xlab("Method") +
+  ylab("Value") +
+  ggtitle("Per-sample summary metrics") +
+  theme(
+    legend.position = "none"
+  )
+
+p_sample_summary
+
+```

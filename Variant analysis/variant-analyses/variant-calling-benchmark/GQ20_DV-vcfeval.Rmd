@@ -1,0 +1,545 @@
+---
+title: "Visualization of DV-vcfeval results for GQ20 threshold"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Variant_Calling_Benchmark/GQ20-filtered-vcfeval-results/"))
+set.seed(0)
+
+require("ggplot2")
+require("cowplot")
+require("viridis")
+require("reshape2")
+require("dplyr")
+require("tidyverse")
+library(plotly)
+library(Rtsne)
+library(stringr)
+library(ggbeeswarm)
+
+library(DSS)
+
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+
+theme_set(theme_cowplot())
+
+library(data.table)
+```
+
+```{r import metrics}
+library(data.table)
+
+all_files <- list.files(
+  ".",
+  recursive = TRUE,
+  full.names = TRUE
+)
+
+roc_files <- all_files[
+  basename(all_files) %in% c("snp_roc.tsv.gz", "non_snp_roc.tsv.gz")
+]
+
+if (length(roc_files) == 0) {
+  stop("No snp_roc.tsv.gz or non_snp_roc.tsv.gz files found.")
+}
+
+roc <- rbindlist(
+  lapply(roc_files, function(file) {
+    df <- fread(file)
+
+    vcfeval_dir <- basename(dirname(file))
+
+    df$Difficulty <- basename(dirname(dirname(dirname(file))))
+    df$Method <- basename(dirname(dirname(file)))
+    df$sample <- sub("^.*\\.(CC[0-9]+)\\..*$", "\\1", vcfeval_dir)
+    df$Type <- ifelse(basename(file) == "snp_roc.tsv.gz", "SNV", "Indel")
+
+    df
+  }),
+  fill = TRUE
+)
+
+colnames(roc)[1] <- "threshold"
+
+nrow(roc)
+table(roc$Difficulty, roc$Method, roc$Type)
+length(unique(roc$sample))
+```
+
+
+```{r plot roc, fig.width=12, fig.height=12}
+ggplot(
+  roc,
+  aes(
+    x = false_positives,
+    y = true_positives_call,
+    color = Method,
+    group = interaction(Difficulty, sample, Method, Type)
+  )
+) +
+  geom_line(alpha = 0.35, linewidth = 0.4) +
+  facet_grid(Difficulty ~ Type, scales = "free") +
+  scale_color_manual(values = c("linear" = "blue", "surjected" = "red")) +
+  labs(
+    x = "False positives",
+    y = "True positives (calls)",
+    title = "ROC curves for linear vs surjected methods"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  geom_abline(
+    slope = 1,
+    intercept = 0,
+    linetype = "dashed",
+    color = "gray"
+  )
+```
+
+```{r plot f-measure, fig.width=4*3, fig.height=4}
+ggplot(
+  roc,
+  aes(
+    x = threshold,
+    y = f_measure,
+    color = Method,
+    linetype = Type,
+    group = interaction(Difficulty, sample, Method, Type)
+  )
+) +
+  geom_line(alpha = 0.1, linewidth = 0.5) +
+  facet_wrap(~Difficulty) +
+  scale_color_manual(values = c("linear" = "blue", "surjected" = "red")) +
+  scale_linetype_manual(values = c("SNV" = "solid", "Indel" = "dashed")) +
+  labs(
+    x = "Threshold",
+    y = "F-measure",
+    title = NULL
+  ) +
+  theme(legend.position = "bottom") +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_x_continuous(limits = c(1, 100), expand = c(0, 0)) +
+  geom_vline(xintercept = 20, linetype = "dashed", color = "gray") +
+  annotate(
+    "text",
+    x = 20,
+    y = 0.5,
+    label = "Threshold = 20",
+    angle = 90,
+    vjust = -0.5,
+    hjust = 1.5,
+    size = 3,
+    color = "gray"
+  )
+
+```
+
+```{r plot counts, fig.width=4, fig.height=3}
+library(scales)
+
+roc_plot_counts <- melt(
+  subset(roc, threshold == 20),
+  id.vars = c("threshold", "Difficulty", "sample", "Type", "Method"),
+  measure.vars = c("false_positives", "false_negatives"),
+  variable.name = "Count_Type",
+  value.name = "Count"
+)
+
+roc_plot_counts[, Count_Type := factor(
+  Count_Type,
+  levels = c("false_positives", "false_negatives"),
+  labels = c("False positives", "False negatives")
+)]
+
+roc_plot_counts_sum <- roc_plot_counts[
+  ,
+  .(Count = sum(Count, na.rm = TRUE)),
+  by = .(Difficulty, Type, Method, Count_Type)
+]
+
+ggplot(
+  roc_plot_counts_sum,
+  aes(x = Method, y = Count/1e6, fill = Type)
+) +
+  geom_col(width = 0.7) +
+  facet_grid(Difficulty ~ Count_Type, scales = "free_y") +
+  labs(
+    x = NULL,
+    y = "Count (millions)",
+    fill = "Variant type"
+  ) +
+  theme_cowplot() +
+  facet_wrap(~ Count_Type) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  scale_fill_manual(values = c("SNV" = "steelblue", "Indel" = "salmon")) +
+  theme(legend.position = "bottom") -> placeholder_plot
+
+placeholder_plot
+
+ggsave(
+  "placeholder_plot.svg",
+  plot = placeholder_plot,
+  width = 4,
+  height = 3,
+  units = "in"
+)
+```
+
+```{r plot counts boxplot, fig.width=4, fig.height=3}
+library(scales)
+
+roc_plot_counts <- melt(
+  subset(roc, threshold == 20),
+  id.vars = c("threshold", "Difficulty", "sample", "Type", "Method"),
+  measure.vars = c("false_positives", "false_negatives"),
+  variable.name = "Count_Type",
+  value.name = "Count"
+)
+
+roc_plot_counts[, Count_Type := factor(
+  Count_Type,
+  levels = c("false_positives", "false_negatives"),
+  labels = c("False positives", "False negatives")
+)]
+
+roc_plot_counts[, Type := factor(
+  Type,
+  levels = c("SNV", "Indel"),
+  labels = c("SNV", "Indel")
+)]
+
+roc_plot_counts[, Difficulty := factor(
+  Difficulty,
+  levels = c("easy", "full", "hard")
+)]
+
+subset(roc_plot_counts, Difficulty !="full") -> roc_plot_counts
+
+ggplot(
+  roc_plot_counts,
+  aes(x = Method, y = Count / 1e6, fill = Type)
+) +
+  geom_boxplot(
+    position = position_dodge(width = 0.8),
+    width = 0.6,
+    outlier.shape = NA
+  ) +
+  geom_point(
+    aes(group = Type),
+    position = position_jitterdodge(
+      jitter.width = 0.12,
+      dodge.width = 0.8
+    ),
+    size = 1,
+    alpha = 1,
+    stroke = 0
+  ) +
+  facet_grid(Difficulty ~ Count_Type) +
+  labs(
+    x = NULL,
+    y = "Count (millions)",
+    fill = "Variant type"
+  ) +
+  theme_cowplot() +
+  scale_y_continuous(limits = c(0, 1.25), expand = c(0, 0)) +
+  scale_fill_manual(values = c("SNV" = "steelblue", "Indel" = "salmon")) +
+  theme(legend.position = "bottom") -> boxplot_with_points
+
+boxplot_with_points
+
+ggsave(
+  "boxplot_with_points.svg",
+  plot = boxplot_with_points,
+  width = 4,
+  height = 3,
+  units = "in"
+)
+
+```
+
+```{r}
+library(data.table)
+library(scales)
+
+setDT(roc_plot_counts)
+
+roc_plot_counts[, Count_Type_short := factor(
+  Count_Type,
+  levels = c("False positives", "False negatives"),
+  labels = c("FP", "FN")
+)]
+
+normality_results <- roc_plot_counts[
+  ,
+  {
+    x <- Count[!is.na(Count)]
+
+    if (length(x) >= 3 && length(x) <= 5000 && length(unique(x)) > 1) {
+      shapiro_out <- shapiro.test(x)
+
+      .(
+        n = .N,
+        n_non_missing = length(x),
+        mean_count = mean(x),
+        sd_count = sd(x),
+        shapiro_W = as.numeric(shapiro_out$statistic),
+        shapiro_p = shapiro_out$p.value
+      )
+    } else {
+      .(
+        n = .N,
+        n_non_missing = length(x),
+        mean_count = mean(x),
+        sd_count = sd(x),
+        shapiro_W = NA_real_,
+        shapiro_p = NA_real_
+      )
+    }
+  },
+  by = .(Type, Difficulty, Count_Type, Method)
+]
+
+normality_results[, shapiro_failed := !is.na(shapiro_p) & shapiro_p < 0.05]
+
+normality_results_display <- normality_results[
+  order(Type, Difficulty, Count_Type, Method),
+  .(
+    Type,
+    Difficulty,
+    Count_Type,
+    Method,
+    n,
+    n_non_missing,
+    mean_millions = mean_count / 1e6,
+    sd_millions = sd_count / 1e6,
+    shapiro_W,
+    shapiro_p,
+    shapiro_failed
+  )
+]
+
+normality_results_display
+
+roc_plot_counts_with_outlier_stats <- merge(
+  roc_plot_counts,
+  normality_results[
+    ,
+    .(
+      Type,
+      Difficulty,
+      Count_Type,
+      Method,
+      group_mean = mean_count,
+      group_sd = sd_count,
+      shapiro_W,
+      shapiro_p,
+      shapiro_failed
+    )
+  ],
+  by = c("Type", "Difficulty", "Count_Type", "Method"),
+  all.x = TRUE
+)
+
+roc_plot_counts_with_outlier_stats[
+  ,
+  z_score := ifelse(
+    is.na(group_sd) | group_sd == 0,
+    NA_real_,
+    (Count - group_mean) / group_sd
+  )
+]
+
+roc_plot_counts_with_outlier_stats[
+  ,
+  exclude_outlier := !is.na(z_score) &
+    abs(z_score) > 2 &
+    shapiro_failed == TRUE
+]
+
+excluded_points <- roc_plot_counts_with_outlier_stats[
+  exclude_outlier == TRUE,
+  .(
+    sample,
+    Type,
+    Difficulty,
+    Count_Type,
+    Method,
+    Count,
+    Count_millions = Count / 1e6,
+    z_score,
+    shapiro_W,
+    shapiro_p
+  )
+][
+  order(Type, Difficulty, Count_Type, Method, sample)
+]
+
+excluded_points
+
+outlier_filter_summary <- roc_plot_counts_with_outlier_stats[
+  ,
+  .(
+    n_total = .N,
+    n_excluded = sum(exclude_outlier, na.rm = TRUE),
+    n_remaining = sum(!exclude_outlier, na.rm = TRUE)
+  ),
+  by = .(Type, Difficulty, Count_Type, Method)
+][
+  order(Type, Difficulty, Count_Type, Method)
+]
+
+outlier_filter_summary
+
+roc_plot_counts_filtered <- roc_plot_counts_with_outlier_stats[
+  exclude_outlier == FALSE
+]
+
+roc_plot_counts_filtered[
+  ,
+  c(
+    "group_mean",
+    "group_sd",
+    "z_score",
+    "shapiro_W",
+    "shapiro_p",
+    "shapiro_failed",
+    "exclude_outlier"
+  ) := NULL
+]
+```
+
+```{r plot counts boxplot method comparison, fig.width=4, fig.height=4}
+roc_plot_counts[, Count_Type_short := factor(
+  Count_Type,
+  levels = c("False positives", "False negatives"),
+  labels = c("FP", "FN")
+)]
+
+ggplot(
+  roc_plot_counts_filtered,
+  aes(x = Count_Type_short, y = Count / 1e6, fill = Method)
+) +
+  geom_boxplot(
+    position = position_dodge(width = 0.8),
+    width = 0.6,
+    outlier.shape = NA
+  ) +
+  geom_point(
+    aes(group = Method),
+    position = position_jitterdodge(
+      jitter.width = 0.25,
+      dodge.width = 0.8
+    ),
+    size = 1,
+    alpha = 1,
+    stroke = 0
+  ) +
+  facet_wrap(~ Type + Difficulty, scales = "free_y", nrow = 2) +
+  labs(
+    x = NULL,
+    y = "Count (millions)",
+    fill = "Method"
+  ) +
+  theme_cowplot() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  scale_fill_manual(values = c("linear" = "steelblue", "surjected" = "salmon")) +
+  theme(legend.position = "bottom") -> boxplot_with_points
+
+boxplot_with_points
+
+# save as svg
+ggsave(
+  "boxplot_with_points_method_comparison.svg",
+  plot = boxplot_with_points,
+  width = 3,
+  height = 4,
+  units = "in"
+)
+
+```
+
+```{r paired randomization tests}
+test_input <- dcast(
+  roc_plot_counts_with_outlier_stats,
+  Difficulty + sample + Type + Count_Type ~ Method,
+  value.var = "Count"
+)
+
+set.seed(0)
+
+n_perm <- 500000
+
+paired_randomization_test <- function(linear, surjected, n_perm = 10000) {
+  keep <- !is.na(linear) & !is.na(surjected)
+
+  linear <- linear[keep]
+  surjected <- surjected[keep]
+
+  paired_diff <- surjected - linear
+
+  if (length(paired_diff) == 0) {
+    return(data.table(
+      n_pairs = 0,
+      mean_linear = NA_real_,
+      mean_surjected = NA_real_,
+      mean_difference = NA_real_,
+      median_difference = NA_real_,
+      p_value = NA_real_
+    ))
+  }
+
+  observed_mean_diff <- mean(paired_diff)
+
+  perm_mean_diff <- replicate(
+    n_perm,
+    mean(paired_diff * sample(c(-1, 1), length(paired_diff), replace = TRUE))
+  )
+
+  p_value <- (
+    sum(abs(perm_mean_diff) >= abs(observed_mean_diff)) + 1
+  ) / (n_perm + 1)
+
+  data.table(
+    n_pairs = length(paired_diff),
+    mean_linear = mean(linear),
+    mean_surjected = mean(surjected),
+    mean_difference = observed_mean_diff,
+    median_difference = median(paired_diff),
+    p_value = p_value
+  )
+}
+
+randomization_results <- test_input[
+  ,
+  paired_randomization_test(
+    linear = linear,
+    surjected = surjected,
+    n_perm = n_perm
+  ),
+  by = .(Difficulty, Type, Count_Type)
+]
+
+randomization_results[, p_adj_bonferroni := p.adjust(p_value, method = "bonferroni")]
+
+randomization_results[
+  order(Count_Type, Type, Difficulty)
+]
+
+fwrite(
+  randomization_results,
+  "randomization_test_results.tsv",
+  sep = "\t"
+)
+```

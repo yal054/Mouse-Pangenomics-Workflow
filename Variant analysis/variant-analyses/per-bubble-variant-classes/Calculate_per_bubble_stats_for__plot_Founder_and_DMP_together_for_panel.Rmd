@@ -1,0 +1,131 @@
+---
+title: "Variation in Max & CC Graph Bubbles"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Calculate_per_bubble_stats_for_the_DMP_graph_from_deconstructed_graph/"))
+set.seed(0)
+
+require("ggplot2")
+require("cowplot")
+require("viridis")
+require("reshape2")
+require("dplyr")
+require("tidyverse")
+library(plotly)
+library(Rtsne)
+library(stringr)
+library(ggbeeswarm)
+
+library(ggforce)
+library(ggbreak)
+
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+
+theme_set(theme_cowplot())
+
+library(readr)
+```
+
+```{r import plotting data}
+# Read in & tag
+mp <- read_tsv("variant_classes_summed_counts.tsv") %>%
+  mutate(Graph = "MP")
+cc <- read_tsv("../Calculate_per_bubble_stats_for_the_CC_graph_from_deconstructed_graph/variant_classes_summed_counts.tsv") %>%
+  mutate(Graph = "CC")
+
+# Summarize to one row per ClassMix × Graph × ALT_Count_Group
+df <- bind_rows(mp, cc) %>%
+  group_by(ClassMix, Graph, ALT_Count_Group) %>%
+  summarise(n = sum(n), .groups = "drop")
+
+# Factor in the correct order
+df <- df %>%
+  mutate(
+    ClassMix        = factor(ClassMix, levels = c("SNV","INDEL","MNV")),
+    Graph           = factor(Graph,    levels = c("MP","CC")),
+    ALT_Count_Group = factor(ALT_Count_Group,
+                             levels = c("2 alleles","3 alleles",">3 alleles"))
+  )
+
+# Compute x-center for MP vs CC bars
+bar_w <- 0.45
+df <- df %>%
+  mutate(
+    xmid = as.numeric(ClassMix) + ifelse(Graph=="MP", -bar_w/2, +bar_w/2)
+  )
+
+# Compute stacked ymin/ymax
+df <- df %>%
+  arrange(ClassMix, Graph, ALT_Count_Group) %>%
+  group_by(ClassMix, Graph) %>%
+  mutate(
+    ymin = lag(cumsum(n), default = 0),
+    ymax = cumsum(n)
+  ) %>%
+  ungroup()
+```
+
+```{r table}
+df
+```
+
+```{r plot, include=TRUE, fig.width=3.66666666667, fig.height=2.66666666667}
+# Draw with geom_rect()
+ggplot(df) +
+  geom_rect(aes(
+    xmin = xmid - bar_w/2,
+    xmax = xmid + bar_w/2,
+    ymin = ymin / 1e6,
+    ymax = ymax / 1e6,
+    fill = ALT_Count_Group
+  ), color = "white", size = 0.1) +
+  scale_x_continuous(
+    breaks = 1:3,
+    labels = c("SNV","INDEL","MNV"),
+    expand = c(0,0)
+  ) +
+  scale_y_continuous(
+    expand = c(0,0),
+    limits = c(0, 42)
+  ) +
+  scale_fill_manual(
+    name   = NULL,
+    breaks = c("2 alleles","3 alleles",">3 alleles"),
+    values = c(
+      "2 alleles"  = "#b96f7450",
+      "3 alleles"  = "#b96f74B0",
+      ">3 alleles" = "#b96f74"
+    )
+  ) +
+  labs(
+    x = NULL,
+    y = expression("Variant sites"~"(×10"^6*")")
+  ) +
+  JFMVTheme +
+  theme(legend.position = "bottom") -> p1
+
+p1
+
+
+
+
+
+
+# Save as svg
+ggsave("variant_classes_summed_counts_combined_bothGraphs.svg", p1, width = (166.2188/201.4619)*3.66666666667, height = (201.4619/166.2188)*3.66666666667, units = "in", dpi = 300)
+
+```

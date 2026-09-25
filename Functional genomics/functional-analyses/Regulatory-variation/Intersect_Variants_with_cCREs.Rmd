@@ -1,0 +1,862 @@
+---
+title: "Collaborative Cross visualized intersection of variants with cCREs"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+set.seed(0)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Graph_genetic_analysis_New_RI/Intersect_Variants_with_cCREs"))
+
+library(ggplot2)
+library(cowplot)
+library(scales)
+library("dplyr")
+library(factoextra)
+library(tidyr)
+source(file.path(REPO_ROOT, "shared-R", "CS_Aesthetic.R"))
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+library(ggrepel)
+library(factoextra)
+library(ggbreak)
+library(purrr)
+library(stringr)
+```
+
+```{r load_data}
+library(data.table)
+
+fread("founder.plus_allCC.deconstruct.mm10.intersect.mm10-cCREs.All.bed") -> cCREs
+colnames(cCREs)<-c("Var_chrom","Var_start","Var_end","Var_ID","Var_class","cCRE_chrom","cCRE_start","cCRE_end","cCRE_other","cCRE_ID","cCRE_class","Overlap")
+
+# Drop Overlap and cCRE_other
+cCREs <- cCREs %>% select(-Overlap, -cCRE_other)
+
+fread("founder.plus_allCC.deconstruct.mm10.vcfbub.norm.sorted.vcf.tsv") -> variants
+```
+
+```{r merge data}
+cCREs <- merge(
+  cCREs,
+  variants,
+  by.x = "Var_ID",
+  by.y = "ID",
+  all.x = TRUE,
+  sort = FALSE
+)
+
+rm(variants)
+```
+
+```{r save data}
+write.table(cCREs, "founder.plus_allCC.deconstruct.mm10.intersect.mm10-cCREs.All.tsv", sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+```{r derive_variant_metrics}
+library(data.table)
+library(stringr)
+
+setDT(cCREs)
+
+cCREs[, Var_width := Var_end - Var_start]
+cCREs[, cCRE_width := cCRE_end - cCRE_start]
+
+# Site-level helper summaries from comma-delimited ALT fields
+cCREs[, ALT_LENS_list := strsplit(ALT_LENS, ",", fixed = TRUE)]
+cCREs[, LEN_DIFFS_list := strsplit(LEN_DIFFS, ",", fixed = TRUE)]
+cCREs[, SITE_CLASSES_list := strsplit(VARIANT_CLASSES, ",", fixed = TRUE)]
+
+cCREs[, max_alt_len := max(as.integer(unlist(ALT_LENS_list))), by = Var_ID]
+cCREs[, min_alt_len := min(as.integer(unlist(ALT_LENS_list))), by = Var_ID]
+cCREs[, max_len_diff := max(as.integer(unlist(LEN_DIFFS_list))), by = Var_ID]
+cCREs[, min_len_diff := min(as.integer(unlist(LEN_DIFFS_list))), by = Var_ID]
+cCREs[, n_alt_classes := length(unique(unlist(SITE_CLASSES_list))), by = Var_ID]
+cCREs[, multiallelic := NUM_ALTS > 1]
+```
+
+```{r expand_to_alt_level}
+expand_alt_rows <- function(dt) {
+  out <- dt[, {
+    alt_lens_vec <- as.integer(strsplit(ALT_LENS, ",", fixed = TRUE)[[1]])
+    len_diffs_vec <- as.integer(strsplit(LEN_DIFFS, ",", fixed = TRUE)[[1]])
+    alt_ns_vec <- as.integer(strsplit(ALT_NS, ",", fixed = TRUE)[[1]])
+    alt_missing_vec <- strsplit(ALT_MISSING, ",", fixed = TRUE)[[1]]
+    var_classes_vec <- strsplit(VARIANT_CLASSES, ",", fixed = TRUE)[[1]]
+    n_equiv_vec <- strsplit(N_EQUIV, ",", fixed = TRUE)[[1]]
+
+    .(
+      ALT_INDEX = seq_along(alt_lens_vec),
+      ALT_LEN = alt_lens_vec,
+      LEN_DIFF = len_diffs_vec,
+      ALT_NS_single = alt_ns_vec,
+      ALT_MISSING_single = alt_missing_vec,
+      ALT_CLASS = var_classes_vec,
+      N_EQUIV_single = n_equiv_vec
+    )
+  }, by = .(
+    Var_ID,
+    Var_chrom,
+    Var_start,
+    Var_end,
+    Var_class,
+    cCRE_chrom,
+    cCRE_start,
+    cCRE_end,
+    cCRE_ID,
+    cCRE_class,
+    POS,
+    REF_LEN,
+    NUM_ALTS,
+    REF_NS,
+    SITE_LABEL,
+    Var_width,
+    cCRE_width,
+    multiallelic
+  )]
+
+  out[, ALT_MISSING_single := ALT_MISSING_single == "True"]
+  out[, N_EQUIV_single := fifelse(N_EQUIV_single == "NA", NA, N_EQUIV_single == "True")]
+
+  out
+}
+
+cCREs_alt <- expand_alt_rows(cCREs)
+```
+
+```{r get_type}
+# Site-level complexity
+cCREs$Var_complexity <- ifelse(
+  cCREs$Var_class %in% c("INDEL", "SNV", "MNV"),
+  "SIMPLE",
+  "COMPLEX"
+)
+
+cCREs$Var_complexity <- factor(
+  cCREs$Var_complexity,
+  levels = c("SIMPLE", "COMPLEX")
+)
+
+# Allele-level complexity
+cCREs_alt$ALT_complexity <- ifelse(
+  cCREs_alt$ALT_CLASS %in% c("INDEL", "SNV", "MNV"),
+  "SIMPLE",
+  "COMPLEX"
+)
+
+cCREs_alt$ALT_complexity <- factor(
+  cCREs_alt$ALT_complexity,
+  levels = c("SIMPLE", "COMPLEX")
+)
+```
+
+```{r plot_simple_complex_counts, fig.width=6, fig.height=4}
+plot_dt <- unique(cCREs[, .(Var_ID, Var_complexity)])
+
+ggplot(
+  plot_dt %>%
+    count(Var_complexity),
+  aes(x = Var_complexity, y = n, fill = Var_complexity)
+) +
+  geom_col() +
+  scale_y_continuous(
+    name = "Intersected sites",
+    labels = comma,
+    expand = c(0, 0)
+  ) +
+  scale_fill_viridis_d(name = "Variant complexity", option="cividis") +
+  ggtitle("Intersected sites by complexity") +
+  scale_x_discrete(name = "Variant complexity", expand = c(0, 0)) +
+  theme_bw() +
+  # add counts on top of bars
+  geom_text(
+    aes(label = ceiling(n/1e3)),
+    position = position_stack(vjust = 0.5),
+    color = "black",
+    size = 4,
+    # rotate labels for better fit
+    angle = 90,
+    vjust = 0.5
+  )
+```
+
+```{r plot_simple_complex_by_cCRE, fig.width=8, fig.height=4}
+plot_dt <- unique(cCREs[, .(Var_ID, cCRE_ID, cCRE_class, Var_complexity)])
+
+ggplot(
+  plot_dt %>%
+    count(cCRE_class, Var_complexity),
+  aes(x = cCRE_class, y = n, fill = Var_complexity)
+) +
+  geom_col() +
+  coord_flip() +
+  scale_y_continuous(
+    name = "Intersected sites",
+    labels = comma,
+    expand = c(0, 0)
+  ) +
+  scale_x_discrete(name = "cCRE class") +
+  scale_fill_viridis_d(name = "Variant complexity", option="cividis") +
+  ggtitle("Simple and complex sites across cCRE classes") +
+  theme_bw()
+```
+
+```{r plot_simple_complex_fraction_by_cCRE, fig.width=8, fig.height=4}
+plot_dt <- unique(cCREs[, .(Var_ID, cCRE_ID, cCRE_class, Var_complexity)])
+
+ggplot(
+  plot_dt %>%
+    count(cCRE_class, Var_complexity),
+  aes(x = cCRE_class, y = n, fill = Var_complexity)
+) +
+  geom_col(position = "fill") +
+  coord_flip() +
+  scale_y_continuous(
+    name = "Fraction",
+    labels = percent,
+    expand = c(0, 0)
+  ) +
+  scale_x_discrete(name = "cCRE class", expand = c(0,0)) +
+  scale_fill_viridis_d(name = "Variant complexity", option="cividis") +
+  ggtitle("Simple versus complex composition by cCRE class")
+```
+
+```{r plot_simple_complex_heatmap, fig.width=8, fig.height=4}
+plot_dt <- unique(cCREs[, .(Var_ID, cCRE_ID, cCRE_class, Var_complexity)])
+
+ggplot(
+  plot_dt %>%
+    count(cCRE_class, Var_complexity),
+  aes(x = Var_complexity, y = cCRE_class, fill = n)
+) +
+  geom_tile() +
+  scale_fill_viridis_c(
+    name = "Intersected sites",
+    labels = comma
+  ) +
+  scale_x_discrete(name = "Variant complexity", expand = c(0,0)) +
+  scale_y_discrete(name = "cCRE class", expand = c(0,0)) +
+  ggtitle("Complexity by cCRE class")
+```
+
+```{r plot_alt_len_simple_complex, fig.width=6, fig.height=4}
+plot_dt <- unique(cCREs[, .(Var_ID, Var_complexity, max_alt_len)])
+
+ggplot(
+  plot_dt,
+  aes(x = max_alt_len/1e3, fill = Var_complexity)
+) +
+  geom_histogram(bins = 80) +
+  scale_x_continuous(name = "Maximum ALT length per site (kb)", trans = "log10", expand = c(0,0)) +
+  scale_y_continuous(
+    name = "Intersected sites",
+    labels = comma,
+    expand = c(0, 0),
+    n.breaks = 5
+  ) +
+  scale_fill_viridis_d(name = "Variant complexity", option="cividis") +
+  ggtitle("Maximum ALT length by complexity")
+```
+
+```{r plot_len_diff_simple_complex, fig.width=6, fig.height=4}
+plot_dt <- unique(cCREs[, .(Var_ID, Var_complexity, max_len_diff)])
+
+ggplot(
+  plot_dt,
+  aes(x = max_len_diff/1e3, fill = Var_complexity)
+) +
+  geom_histogram(bins = 25) +
+  scale_x_continuous(name = "Maximum allele length\ndifference per site (kb)", trans = "log10", expand = c(0,0)) +
+  scale_y_continuous(
+    name = "Intersected sites",
+    labels = comma,
+    expand = c(0, 0),
+    n.breaks = 5
+  ) +
+  scale_fill_viridis_d(name = "Variant complexity", option="cividis") +
+  geom_vline(xintercept = 250/1e3, linetype = "dashed", color = "black")
+```
+
+```{r get_plot_class}
+cCREs$Var_plot_class <- ifelse(
+  cCREs$Var_class == "SNV",
+  "SNV",
+  ifelse(
+    cCREs$Var_class == "MNV",
+    "MNV",
+    ifelse(
+      cCREs$Var_class == "INDEL" & cCREs$max_len_diff > 50,
+      "SV",
+      ifelse(
+        cCREs$Var_class == "INDEL",
+        "INDEL",
+        "COMPLEX"
+      )
+    )
+  )
+)
+
+cCREs$Var_plot_class <- factor(
+  cCREs$Var_plot_class,
+  levels = c("SNV", "MNV", "INDEL", "SV", "COMPLEX")
+)
+
+cCREs_alt$ALT_plot_class <- ifelse(
+  cCREs_alt$ALT_CLASS == "SNV",
+  "SNV",
+  ifelse(
+    cCREs_alt$ALT_CLASS == "MNV",
+    "MNV",
+    ifelse(
+      cCREs_alt$ALT_CLASS == "INDEL" & cCREs_alt$LEN_DIFF > 50,
+      "SV",
+      ifelse(
+        cCREs_alt$ALT_CLASS == "INDEL",
+        "INDEL",
+        "COMPLEX"
+      )
+    )
+  )
+)
+
+cCREs_alt$ALT_plot_class <- factor(
+  cCREs_alt$ALT_plot_class,
+  levels = c("SNV", "MNV", "INDEL", "SV", "COMPLEX")
+)
+```
+
+
+```{r plot_variant_classes_collapsed, fig.width=5, fig.height=3}
+plot_dt <- unique(cCREs[, .(Var_ID, Var_plot_class)])
+
+
+
+ggplot(
+  plot_dt %>%
+    count(Var_plot_class),
+  aes(
+    x = Var_plot_class,
+    y = n,
+    fill = Var_plot_class
+  )
+) +
+  geom_col() +
+  scale_y_continuous(
+    name = "Intersected sites",
+    labels = comma,
+    expand = c(0, 0)
+  ) +
+  scale_x_discrete(name = "Variant class") +
+  scale_fill_viridis_d(name = "Variant class", option="turbo") +
+  ggtitle("Intersected sites by variant class") +
+  theme_bw() +
+  # add counts on top of bars
+  geom_text(
+    aes(label = ceiling(n/1e3)),
+    position = position_stack(vjust = 0.5),
+    color = "black",
+    size = 4,
+    # rotate labels for better fit
+    angle = 90,
+    vjust = 0.5
+  ) -> variant_class_counts_plot
+
+variant_class_counts_plot
+
+# save as svg
+ggsave(
+  "variant_class_counts_plot.svg",
+  plot = variant_class_counts_plot,
+  width = 5,
+  height = 3,
+  units = "in"
+)
+```
+
+```{r plot_len_diff_simple_class, fig.width=6, fig.height=4}
+plot_dt <- unique(cCREs[, .(Var_ID, Var_plot_class, max_len_diff)])
+
+ggplot(
+  subset(plot_dt, Var_plot_class!="SNV"),
+  aes(x = max_len_diff/1e3, fill = Var_plot_class)
+) +
+  geom_histogram(bins = 25) +
+  scale_x_continuous(name = "Maximum allele length\ndifference per site (kb)", trans="log10", expand = c(0,0)) +
+  scale_y_continuous(
+    name = "Intersected sites",
+    labels = comma,
+    expand = c(0, 0),
+    n.breaks = 5
+  ) +
+  labs(fill = "Variant complexity") +
+  scale_fill_viridis_d(name = "Variant class")
+
+```
+
+```{r plot_variant_classes_collapsed_by_cCRE, fig.width=5, fig.height=4}
+plot_dt <- unique(cCREs[, .(Var_ID, cCRE_ID, cCRE_class, Var_plot_class)])
+
+ggplot(
+  plot_dt %>%
+    count(cCRE_class, Var_plot_class),
+  aes(
+    x = cCRE_class,
+    y = n,
+    fill = Var_plot_class
+  )
+) +
+  geom_col(position = "fill") +
+  coord_flip() +
+  scale_y_continuous(
+    name = "Fraction",
+    labels = percent,
+    expand = c(0, 0)
+  ) +
+  scale_x_discrete(name = "cCRE class", expand = c(0,0)) +
+  scale_fill_viridis_d(name = "Variant class", option="turbo") +
+  ggtitle("Variant class composition by cCRE class") +
+  theme_bw()
+```
+
+
+```{r plot_cCRE_class_by_variant_class_heatmap, fig.width=6, fig.height=4}
+plot_dt <- unique(
+  cCREs[, .(
+    Var_ID,
+    cCRE_class,
+    Var_plot_class
+  )]
+)
+
+heat_dt <- plot_dt %>%
+  count(cCRE_class, Var_plot_class)
+
+ggplot(
+  heat_dt,
+  aes(x = Var_plot_class, y = cCRE_class, fill = n)
+) +
+  geom_tile() +
+  scale_fill_viridis_c(
+    name = "Intersected sites",
+    labels = comma
+  ) +
+  scale_x_discrete(name = "Variant class", expand = c(0,0)) +
+  scale_y_discrete(name = "cCRE class", expand = c(0,0)) +
+  theme_bw()
+```
+
+```{r generate_cCRE_mutational_burden}
+library(data.table)
+
+setDT(cCREs)
+
+# Collapse variant classes for burden summaries
+cCREs[, Var_plot_class := ifelse(
+  Var_class %in% c("SNV", "MNV", "INDEL"),
+  Var_class,
+  "COMPLEX"
+)]
+
+# Reference-span width of the intersected site
+cCREs[, Var_width := Var_end - Var_start]
+
+# Parse comma-delimited per-site summaries from the original variant table
+cCREs[, ALT_LENS_list := strsplit(ALT_LENS, ",", fixed = TRUE)]
+cCREs[, LEN_DIFFS_list := strsplit(LEN_DIFFS, ",", fixed = TRUE)]
+
+# Site-level burden summaries
+cCREs[, max_alt_len := max(as.integer(unlist(ALT_LENS_list))), by = Var_ID]
+cCREs[, max_len_diff := max(as.integer(unlist(LEN_DIFFS_list))), by = Var_ID]
+
+# Reduce to unique cCRE-site pairs
+# This is the key unit for burden:
+# one unique variant site contributing to one cCRE
+cCRE_site <- unique(
+  cCREs[, .(
+    cCRE_chrom,
+    cCRE_start,
+    cCRE_end,
+    cCRE_ID,
+    cCRE_class,
+    Var_ID,
+    Var_class,
+    Var_plot_class,
+    Var_width,
+    max_alt_len,
+    max_len_diff
+  )]
+)
+
+# Generate one row per cCRE with burden summaries
+cCRE_burden <- cCRE_site[, .(
+  cCRE_width = unique(cCRE_end - cCRE_start),
+  n_events = .N,
+  n_SNV = sum(Var_plot_class == "SNV"),
+  n_MNV = sum(Var_plot_class == "MNV"),
+  n_INDEL = sum(Var_plot_class == "INDEL"),
+  n_COMPLEX = sum(Var_plot_class == "COMPLEX"),
+  burden_ref_bp = sum(Var_width, na.rm = TRUE),
+  burden_max_alt_bp = sum(max_alt_len, na.rm = TRUE),
+  burden_max_len_diff_bp = sum(max_len_diff, na.rm = TRUE)
+), by = .(
+  cCRE_chrom,
+  cCRE_start,
+  cCRE_end,
+  cCRE_ID,
+  cCRE_class
+)]
+
+# Add normalized burdens
+cCRE_burden[, events_per_kb := n_events / (cCRE_width / 1000)]
+cCRE_burden[, ref_bp_per_kb := burden_ref_bp / (cCRE_width / 1000)]
+cCRE_burden[, max_alt_bp_per_kb := burden_max_alt_bp / (cCRE_width / 1000)]
+cCRE_burden[, max_len_diff_bp_per_kb := burden_max_len_diff_bp / (cCRE_width / 1000)]
+```
+
+```{r save_cCRE_burden}
+write.table(
+  cCRE_burden,
+  "founder.plus_allCC.deconstruct.mm10.intersect.mm10-cCRE_mutational_burden.tsv",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+```
+
+
+```{r plot_01_burden_histogram, fig.width=4, fig.height=4}
+ggplot(
+  cCRE_burden,
+  aes(x = n_events)
+) +
+  geom_histogram(bins = 30) +
+  scale_x_continuous(
+    name = "Events per cCRE",
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    name = "Count of cCREs",
+    labels = comma,
+    expand = c(0, 0)
+  ) +
+  ggtitle("cCRE mutational burden") +
+  theme_bw()
+```
+
+```{r plot_03_burden_by_class_boxplot, fig.width=5, fig.height=4}
+ggplot(
+  cCRE_burden,
+  aes(x = cCRE_class, y = n_events)
+) +
+  geom_boxplot(outlier.shape = NA) +
+  coord_flip() +
+  scale_y_continuous(
+    name = "Events per cCRE",
+    labels = comma,
+    limits = c(0, 20)
+  ) +
+  scale_x_discrete(
+    name = "cCRE class"
+  ) +
+  ggtitle("cCRE mutational burden") +
+  theme_bw()
+```
+
+```{r plot_04_burden_by_class_violin, fig.width=5, fig.height=4}
+ggplot(
+  cCRE_burden,
+  aes(x = cCRE_class, y = n_events)
+) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.15, outlier.shape = NA) +
+  coord_flip() +
+  scale_y_continuous(
+    name = "Events per cCRE",
+    labels = comma,
+    limits = c(0, 20)
+  ) +
+  scale_x_discrete(
+    name = "cCRE class"
+  ) +
+  ggtitle("Distribution of cCRE mutational burden") +
+  theme_bw()
+```
+
+```{r plot_05_events_per_kb_by_class, fig.width=5, fig.height=4}
+ggplot(
+  cCRE_burden,
+  aes(x = cCRE_class, y = 300*events_per_kb/1e3)
+) +
+  geom_boxplot(outlier.shape = NA) +
+  coord_flip() +
+  scale_y_continuous(
+    name = "Events per 300 bp",
+    labels = comma
+  ) +
+  scale_x_discrete(
+    name = "cCRE class"
+  ) +
+  ggtitle("Normalized cCRE mutational burden") +
+  theme_bw() +
+  geom_hline(yintercept = 4.72, linetype = "dashed", color = "red")
+```
+
+```{r plot_06_events_per_kb_histogram, fig.width=4, fig.height=4}
+BurdenThreshLow<-10
+BurdenThreshHigh<-14
+
+# what fraction of cCREs have events_per_kb > BurdenThreshLow?
+fraction_high_burden_Low <- mean(300*cCRE_burden$events_per_kb/1e3 >= BurdenThreshLow)
+fraction_high_burden_Low*100
+
+# what fraction of cCREs have events_per_kb > BurdenThreshHigh?
+fraction_high_burden_High <- mean(300*cCRE_burden$events_per_kb/1e3 >= BurdenThreshHigh)
+fraction_high_burden_High*100
+
+ggplot(
+  cCRE_burden[cCRE_burden$events_per_kb > 0, ],
+  aes(x = 300*events_per_kb/1e3)
+) +
+  geom_histogram(bins = 80) +
+  scale_x_continuous(
+    name = "Events per 300 bp",
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    name = "Count of cCREs",
+    labels = comma,
+#    trans = "log10",
+    expand = c(0, 0)
+  ) +
+  ggtitle("Distribution of normalized\nmutational burden") +
+  theme_bw() +
+  # rectangles for burden thresholds
+  geom_rect(
+    data=data.frame(BurdenThreshLow, BurdenThreshHigh),
+    aes(xmin = BurdenThreshLow, xmax = BurdenThreshHigh, ymin = 0, ymax = Inf),
+    fill = "red",
+    alpha = 0.1,
+    inherit.aes = FALSE
+  ) +
+  geom_vline(xintercept = c(BurdenThreshLow, BurdenThreshHigh), linetype = "dashed", color = "red") +
+  # add range of fraction_high_burden_Low*100 to fraction_high_burden_High*100 as text annotation
+  annotate(
+    "text",
+    x = 2.75*(BurdenThreshLow + BurdenThreshHigh) / 2,
+    y = 50000,
+    label = paste0(round(fraction_high_burden_Low*100, 1), "% - ", round(fraction_high_burden_High*100, 1), "% of cCREs"),
+    color = "red",
+    size = 4,
+    vjust = -0.5
+  ) -> events_per_kb_histogram
+
+events_per_kb_histogram
+
+# save as svg
+ggsave(
+  "events_per_kb_histogram.svg",
+  plot = events_per_kb_histogram,
+  width = 4,
+  height = 4,
+  units = "in"
+)
+
+```
+
+```{r plot_07_cCRE_width_histogram, fig.width=4, fig.height=4}
+ggplot(
+  cCRE_burden,
+  aes(x = cCRE_width)
+) +
+  geom_histogram(bins = 50) +
+  scale_x_continuous(
+    name = "cCRE width (bp)",
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    name = "Count of cCREs",
+    labels = comma,
+    expand = c(0, 0)
+  ) +
+  ggtitle("cCRE width distribution") +
+  theme_bw()
+```
+
+```{r plot_08_width_vs_events, fig.width=4.5, fig.height=3.5}
+ggplot(
+  cCRE_burden,
+  aes(x = cCRE_width, y = n_events)
+) +
+  #geom_point(alpha = 0.2, size = 0.5) +
+  # scale_x_log10(
+  #   name = "cCRE width"
+  # ) +
+  # scale_y_log10(
+  #   name = "Events per cCRE"
+  # ) +
+  geom_hex(bins = 50) +
+  scale_fill_viridis_c(
+    name = "Count of cCREs",
+    labels = comma
+  ) +
+  scale_x_continuous(
+    name = "cCRE width",
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    name = "Events per cCRE",
+    expand = c(0, 0)
+  ) +
+  ggtitle("cCRE width versus mutational burden") +
+  theme_bw()
+```
+
+```{r plot_09_events_per_kb_vs_width, fig.width=12, fig.height=4}
+print("Summary of cCRE mutational burden:")
+print("cCREs with at least SNV event:")
+nrow(subset(cCRE_burden, n_SNV>0))
+print("cCREs with at least MNV event:")
+nrow(subset(cCRE_burden, n_MNV>0))
+print("cCREs with at least INDEL event:")
+nrow(subset(cCRE_burden, n_INDEL>0))
+print("cCREs with at least COMPLEX event:")
+nrow(subset(cCRE_burden, n_COMPLEX>0))
+
+# split by cCRE_class
+print("Summary of cCRE mutational burden by cCRE class:")
+cCRE_burden %>%
+  group_by(cCRE_class) %>%
+  summarise(
+    total_cCREs = n(),
+    cCREs_with_SNV = sum(n_SNV > 0),
+    cCREs_with_MNV = sum(n_MNV > 0),
+    cCREs_with_INDEL = sum(n_INDEL > 0),
+    cCREs_with_COMPLEX = sum(n_COMPLEX > 0)
+  ) -> Unique_cCRE_burden_summary
+
+print(Unique_cCRE_burden_summary)
+
+# plot as heatmap of count of cCREs with each event type by cCRE class
+Unique_cCRE_burden_summary_long <- Unique_cCRE_burden_summary %>%
+  pivot_longer(
+    cols = c(cCREs_with_SNV, cCREs_with_MNV, cCREs_with_INDEL, cCREs_with_COMPLEX),
+    names_to = "Event_type",
+    values_to = "Count"
+  )
+
+
+ggplot(
+  Unique_cCRE_burden_summary_long,
+  aes(x = Event_type, y = cCRE_class, fill = Count)
+) +
+  geom_tile() +
+  scale_fill_viridis_c(
+    name = "Count of cCREs",
+    labels = comma,
+    option = "turbo",
+    trans = "log10"
+  ) +
+  scale_y_discrete(name = "cCRE class", expand = c(0,0)) +
+  ggtitle("Count of cCREs with each event type by cCRE class") +
+  # add count labels on tiles
+  geom_text(
+    aes(label = Count),
+    color = "black",
+    size = 3,
+    # comma format the labels
+    label = scales::comma(Unique_cCRE_burden_summary_long$Count)
+  ) +
+  theme_cowplot() +
+  # replace Event_type labels with more readable labels
+  scale_x_discrete(
+    name = "Event type",
+    labels = c(
+      "cCREs with SNV",
+      "cCREs with MNV",
+      "cCREs with INDEL",
+      "cCREs with COMPLEX"
+    ),
+    expand = c(0,0)
+  ) -> cCRE_burden_event_type_heatmap
+
+# save as svg
+ggsave(
+  "cCRE_burden_event_type_heatmap.svg",
+  plot = cCRE_burden_event_type_heatmap,
+  width = 12,
+  height = 4,
+  units = "in"
+)
+
+# save table of cCRE_burden_summary as tsv
+write.table(
+  Unique_cCRE_burden_summary,
+  "cCRE_burden_summary_by_cCRE_class.tsv",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+```
+
+```{r plot_12_top_cCREs_by_events, fig.width=5, fig.height=4}
+top_cCREs <- cCRE_burden %>%
+  arrange(desc(n_events)) %>%
+  slice_head(n = 30)
+
+top_cCREs
+
+ggplot(
+  top_cCREs,
+  aes(x = reorder(cCRE_ID, n_events), y = n_events, fill = cCRE_class)
+) +
+  geom_col() +
+  coord_flip() +
+  scale_y_continuous(
+    name = "Events per cCRE",
+    labels = comma
+  ) +
+  scale_x_discrete(
+    name = "cCRE ID"
+  ) +
+  labs(fill = "cCRE class") +
+  ggtitle("Top cCREs by mutational burden") +
+  theme_bw()
+```
+
+```{r plot_13_top_cCREs_by_events_per_kb, fig.width=5, fig.height=4}
+top_cCREs_norm <- cCRE_burden %>%
+  arrange(desc(events_per_kb)) %>%
+  slice_head(n = 30)
+
+top_cCREs_norm
+
+ggplot(
+  top_cCREs_norm,
+  aes(x = reorder(cCRE_ID, events_per_kb), y = events_per_kb, fill = cCRE_class)
+) +
+  geom_col() +
+  coord_flip() +
+  scale_y_continuous(
+    name = "Events per kb",
+    labels = comma
+  ) +
+  scale_x_discrete(
+    name = "cCRE ID"
+  ) +
+  labs(fill = "cCRE class") +
+  ggtitle("Top cCREs by normalized mutational burden") +
+  theme_bw()
+
+```

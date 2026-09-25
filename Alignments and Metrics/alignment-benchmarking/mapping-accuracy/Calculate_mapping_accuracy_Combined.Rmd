@@ -1,0 +1,215 @@
+---
+title: "Calculate alignment accuracy"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+set.seed(0)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Alignment_Benchmarking/Mapping_Accuracy_Analysis/"))
+
+library(ggplot2)
+library(cowplot)
+library(scales)
+library("dplyr")
+library(factoextra)
+library(tidyr)
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+library(ggrepel)
+library(ggbeeswarm)
+library(data.table)
+```
+
+```{r load data}
+# Load data
+data_pan <- fread("Combined_saturation_metrics_founder_Graph.txt")
+data_mm10 <- fread("Combined_saturation_metrics.txt")
+data_mT2T <- fread("Combined_saturation_metrics_mT2T_BWA.txt")
+
+# filter for 2% subsample
+subset(data_pan, subsample_percent==2) -> data_pan
+subset(data_mm10, subsample_percent==2) -> data_mm10
+
+# add group labels
+data_pan$group <- "Pangenome"
+data_mm10$group <- "GRCm38"
+data_mT2T$group <- "mT2T"
+
+# combine data
+rbind(data_pan, data_mm10, data_mT2T) -> data_combined
+
+# extract relevant columns
+data_combined[,c(2,6:12)] -> data_combined
+
+# save table
+fwrite(
+    data_combined,
+    "Combined_saturation_metrics_2percent.txt",
+    sep = "\t",
+    quote = FALSE
+)
+```
+
+```{r}
+setDT(data_combined)
+
+mapq_levels <- c("0", "1-9", "10-29", "30-59", "60")
+
+mapq_summary <- data_combined[
+    !is.na(mapq_bin),
+    .(
+        total_reads = sum(total, na.rm = TRUE),
+        lifted_reads = sum(lifted, na.rm = TRUE),
+        accurate_reads = sum(accurate, na.rm = TRUE)
+    ),
+    by = .(group, rg, mapq_bin)
+]
+
+mapq_summary[
+    ,
+    `:=`(
+        lifted_within_bin_pct = 100 * lifted_reads / total_reads,
+        accurate_within_bin_pct = 100 * accurate_reads / total_reads,
+        accurate_given_lifted_within_bin_pct = fifelse(
+            lifted_reads > 0,
+            100 * accurate_reads / lifted_reads,
+            NA_real_
+        )
+    )
+]
+
+mapq_summary[
+    ,
+    mapq_bin := factor(mapq_bin, levels = mapq_levels, ordered = TRUE)
+]
+
+mapq_summary[
+    ,
+    group := factor(group, levels = c("GRCm38", "mT2T", "Pangenome"), ordered = TRUE)
+]
+```
+
+```{r}
+mapq_summary[
+  ,
+  .(median_accuracy = median(accurate_given_lifted_within_bin_pct, na.rm = TRUE)),
+  by = .(group, mapq_bin)
+]
+```
+
+```{r}
+ggplot(
+    mapq_summary,
+    aes(
+        x = mapq_bin,
+        y = accurate_given_lifted_within_bin_pct,
+        group = rg
+    )
+) +
+    geom_line(alpha = 0.30, linewidth = 0.3) +
+    geom_point(alpha = 0.50, size = 1) +
+    facet_wrap(~ group, nrow = 1) +
+    scale_y_continuous(
+        labels = percent_format(scale = 1),
+        limits = c(0, 100)
+    ) +
+    labs(
+        x = "MAPQ bin",
+        y = "Accurate among lifted (%)",
+        title = "Mapping accuracy by MAPQ bin"
+    ) +
+    theme_cowplot() +
+    JFMVTheme
+```
+
+```{r plot boxplot, fig.width=4, fig.height=4}
+mapq_medians <- mapq_summary[
+    ,
+    .(
+        median_accuracy = median(accurate_given_lifted_within_bin_pct, na.rm = TRUE)
+    ),
+    by = .(group, mapq_bin)
+]
+
+ggplot(
+    mapq_summary,
+    aes(
+        x = mapq_bin,
+        y = accurate_given_lifted_within_bin_pct,
+        fill = group
+    )
+  ) +
+    geom_line(
+        data = mapq_medians,
+        aes(
+            x = mapq_bin,
+            y = median_accuracy,
+            group = group,
+            color = group
+        ),
+        position = position_dodge(width = 0.8),
+        linewidth = 1,
+        alpha = 0.8
+    ) +
+    geom_boxplot(
+        outlier.shape = NA,
+        width = 0.7,
+        position = position_dodge(width = 0.8)
+    ) +
+    geom_quasirandom(
+        aes(color = group),
+        dodge.width = 0.8,
+        width = 0.15,
+        alpha = 1,
+        size = 0.75,
+        stroke = 0
+    ) +
+    geom_point(
+        data = mapq_medians,
+        aes(
+            x = mapq_bin,
+            y = median_accuracy,
+            group = group,
+            color = group
+        ),
+        position = position_dodge(width = 0.8),
+        size = 1
+    ) +
+    scale_y_continuous(
+        labels = percent_format(scale = 1),
+        limits = c(0, 100)
+    ) +
+    labs(
+        x = "MAPQ bin",
+        y = "Accurate among lifted (%)",
+        title = "Mapping accuracy by MAPQ bin"
+    ) +
+    theme_cowplot() +
+    JFMVTheme +
+    scale_fill_manual(values = c("GRCm38" = "#4a7c8a", "mT2T" = "#c44e52", "Pangenome" = "#6a5acd")) +
+    scale_color_manual(values = c("GRCm38" = "#4a7c8a", "mT2T" = "#c44e52", "Pangenome" = "#6a5acd")) +
+    theme(legend.position = "bottom") -> Mapping_Accuracy_Boxplot
+
+Mapping_Accuracy_Boxplot
+
+# save as svg
+ggsave(
+    "Mapping_Accuracy_Boxplot.svg",
+    plot = Mapping_Accuracy_Boxplot,
+    width = 4,
+    height = 4,
+    units = "in"
+)
+```

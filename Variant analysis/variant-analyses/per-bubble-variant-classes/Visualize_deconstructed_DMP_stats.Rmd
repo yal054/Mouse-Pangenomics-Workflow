@@ -1,0 +1,199 @@
+---
+title: "Summary statistics for bctools stats results"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Calculate_per_bubble_stats_for_the_DMP_graph_from_deconstructed_graph/"))
+set.seed(0)
+
+require("ggplot2")
+require("cowplot")
+require("viridis")
+require("reshape2")
+require("dplyr")
+require("tidyverse")
+library(plotly)
+library(Rtsne)
+library(stringr)
+library(ggbeeswarm)
+
+library(ggforce)
+library(ggbreak)
+
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+
+#theme_set(theme_cowplot())
+
+library(readr)
+```
+
+```{r import plotting data}
+read_bcftools_stats <- function(file,
+                                sections = c("SN","TSTV","SiS","AF","QUAL","IDD","ST","DP")) {
+  lines <- readLines(file)
+  stats <- list()
+  for(sec in sections) {
+    sec_lines <- grep(paste0("^", sec, "\t"), lines, value=TRUE)
+    if(length(sec_lines)==0) next
+    # strip off the “SEC\t” prefix, read as table
+    df <- read.table(
+      text       = sub(paste0("^", sec, "\t"), "", sec_lines),
+      sep        = "\t",
+      header     = FALSE,
+      stringsAsFactors = FALSE
+    )
+    stats[[sec]] <- df
+  }
+  stats
+}
+
+
+# read in your .stats file
+stats <- read_bcftools_stats("DMP.full.vcf.stats")
+
+# Summary numbers
+sn <- stats$SN
+colnames(sn) <- c("ID","key","value")  # adjust if 2-col only
+sn[,-1]->sn
+
+## In keys, replace "number of " with ""
+sn$key <- gsub("number of ","",sn$key)
+## In keys, remove ":"
+sn$key <- gsub(":","",sn$key)
+## Remove "samples" and "no-ALTs" from keys
+subset(sn, key != "samples" & key != "no-ALTs")->sn
+
+# TSTV: transition/transversion counts
+tstv <- stats$TSTV
+colnames(tstv) <- c("ID","ts","tv","ts/tv","ts (1st ALT)","tv (1st ALT)","ts/tv (1st ALT)")
+tstv[,-1]->tstv
+
+# remove all but the ts/tv ratios
+tstv[,c(3,6)]->tstv
+## make long format
+gather(tstv, key="type", value="count")->tstv
+
+
+# AF: allele-frequency distribution (bin vs count)
+af <- stats$AF
+colnames(af) <- c("ID","allele_frequency","number_SNPs","number_transitions","number_transversions","number_indels","repeat-consistent","repeat-inconsistent","not_applicable")
+af[,-1]->af
+
+
+# IDD: indel distribution
+idd <- stats$IDD
+colnames(idd) <- c("ID","length", "count")
+idd[,-1]->idd
+
+# ST: Substitution types
+st <- stats$ST
+colnames(st) <- c("ID","type","count")
+st[,-1]->st
+```
+
+```{r plot TSTV, include=TRUE, fig.width=11/3, fig.height=8.5/3}
+# Plot TSTV
+ggplot(tstv, aes(x=type,y=count))+
+  geom_bar(stat="identity", fill="blue")+
+  scale_y_continuous(expand=c(0,0), limits=c(0, max(tstv$count)*1.2))+
+  scale_x_discrete(limits=tstv$type)+
+  labs(x="", y="Count")+
+  #JFMVTheme +
+  theme(axis.text.x = element_text(angle=45, hjust=1))+
+  # add repelled text labels, centered on the bars, rounded to 3 decimal
+  ggrepel::geom_text_repel(
+    aes(label = count),
+    nudge_y = 0.1,
+    size = 3,
+    show.legend = FALSE,
+    segment.size = 0.2,
+    segment.color = "black",
+    max.overlaps = Inf
+  ) -> p2
+
+p2
+
+```
+
+```{r plot AF, include=TRUE, fig.width=11/3, fig.height=8.5/3}
+# Plot AF
+ggplot(af, aes(x=allele_frequency,y=number_SNPs))+
+  geom_bar(stat="identity", fill="blue")+
+  scale_y_continuous(expand=c(0,0), limits=c(0, max(af$number_SNPs)*1.2))+
+  labs(x="AF", y="Number of SNPs")+
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle=45, hjust=1)) -> p3
+
+ggplot(af, aes(x=allele_frequency,y=number_transitions))+
+  geom_bar(stat="identity", fill="blue")+
+  scale_y_continuous(expand=c(0,0), limits=c(0, max(af$number_transitions)*1.2))+
+  labs(x="AF", y="Number of transitions")+
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle=45, hjust=1)) -> p4
+
+ggplot(af, aes(x=allele_frequency,y=number_transversions))+
+  geom_bar(stat="identity", fill="blue")+
+  scale_y_continuous(expand=c(0,0), limits=c(0, max(af$number_transversions)*1.2))+
+  labs(x="AF", y="Number of transversions")+
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle=45, hjust=1)) -> p5
+
+ggplot(af, aes(x=allele_frequency,y=number_indels))+
+  geom_bar(stat="identity", fill="blue")+
+  scale_y_continuous(expand=c(0,0), limits=c(0, max(af$number_indels)*1.2))+
+  labs(x="AF", y="Number of indels")+
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle=45, hjust=1)) -> p6
+
+ p3
+ p4
+ p5
+ p6
+
+```
+
+```{r plot IDD, include=TRUE, fig.width=11/3, fig.height=8.5/3}
+# Plot IDD
+ggplot(idd, aes(x=length,y=count/1e6))+
+  geom_bar(stat="identity", fill="blue")+
+  scale_y_continuous(expand=c(0,0), limits=c(0, max(idd$count/1e6)*1.2))+
+  labs(x="Length (deletions negative)", y="Count (x1e6)")+
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle=45, hjust=1))
+```
+
+```{r plot ST, include=TRUE, fig.width=11/3, fig.height=8.5/3}
+# Plot ST
+ggplot(st, aes(x=type,y=count/1e6))+
+  geom_bar(stat="identity", fill="blue")+
+  scale_y_continuous(expand=c(0,0), limits=c(0, max(st$count/1e6)*1.2))+
+  labs(x="Substitution", y="Count")+
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle=45, hjust=1))+
+  # add repelled text labels, centered on the bars, rounded to 3 decimal
+  ggrepel::geom_text_repel(
+    aes(label = round(count/1e6,3) ),
+    nudge_y = 0.75,
+    size = 3,
+    show.legend = FALSE,
+    segment.size = 0.2,
+    segment.color = "black",
+    max.overlaps = Inf
+  ) -> p7
+
+p7
+
+```

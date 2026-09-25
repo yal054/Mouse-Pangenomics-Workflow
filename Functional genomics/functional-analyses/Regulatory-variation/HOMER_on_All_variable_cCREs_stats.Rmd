@@ -1,0 +1,279 @@
+---
+title: "Visualize HOMER annotation stats"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Graph_genetic_analysis_New_RI/Intersect_Variants_with_cCREs/"))
+set.seed(0)
+
+require("ggplot2")
+require("cowplot")
+require("viridis")
+require("reshape2")
+require("dplyr")
+library(plotly)
+library(Rtsne)
+library(stringr)
+library(ggbeeswarm)
+library(ggrepel)
+library(scales)
+library(WebGestaltR)
+require("tidyverse")
+
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+
+theme_set(theme_cowplot())
+```
+
+```{r import all sites stats}
+read.delim("variable_cCRE_format.HOMER.out.stats")->stats
+
+c(1:nrow(stats))[stats[,1]=="Annotation"]->Breakpoint
+# Split stats, putting entries above the Breakpoint line into a new data frame and entries below the Breakpoint line into a new data frame
+
+stats[1:(Breakpoint-1),]->GeneFeatures
+stats[(Breakpoint+1):nrow(stats),]->GenomicFeatues
+
+rownames(GeneFeatures)<-NULL
+rownames(GenomicFeatues)<-NULL
+
+rm(stats)
+
+# Convert Number.of.peaks to numeric
+GeneFeatures$Number.of.peaks<-as.numeric(GeneFeatures$Number.of.peaks)
+# Convert Total.size..bp. to numeric
+GeneFeatures$Total.size..bp.<-as.numeric(GeneFeatures$Total.size..bp.)
+# Convert Log2.Ratio..obs.exp. to numeric
+GeneFeatures$Log2.Ratio..obs.exp.<-as.numeric(GeneFeatures$Log2.Ratio..obs.exp.)
+# Convert LogP.enrichment...values.depleted.
+GeneFeatures$LogP.enrichment...values.depleted.<-as.numeric(GeneFeatures$LogP.enrichment...values.depleted.)
+
+# remove empty classes (Number.of.peaks == 0)
+GeneFeatures<-GeneFeatures[GeneFeatures$Number.of.peaks>0,]
+
+# Convert Number.of.peaks to numeric
+GenomicFeatues$Number.of.peaks<-as.numeric(GenomicFeatues$Number.of.peaks)
+# Convert Total.size..bp. to numeric
+GenomicFeatues$Total.size..bp.<-as.numeric(GenomicFeatues$Total.size..bp.)
+# Convert Log2.Ratio..obs.exp. to numeric
+GenomicFeatues$Log2.Ratio..obs.exp.<-as.numeric(GenomicFeatues$Log2.Ratio..obs.exp.)
+# Convert LogP.enrichment...values.depleted.
+GenomicFeatues$LogP.enrichment...values.depleted.<-as.numeric(GenomicFeatues$LogP.enrichment...values.depleted.)
+
+# remove empty classes (Number.of.peaks == 0)
+GenomicFeatues<-GenomicFeatues[GenomicFeatues$Number.of.peaks>0,]
+
+
+sum(GeneFeatures$Number.of.peaks)
+sum(GenomicFeatues$Number.of.peaks)
+
+## HOMER assigns annotations in this order of priority:
+# TSS (by default defined from -1kb to +100bp) (aka Promoter)
+# TTS (by default defined from -100 bp to +1kb)
+# CDS Exons
+# 5' UTR Exons
+# 3' UTR Exons
+# Introns
+# Intergenic
+# miRNA (their docs don't specify where these go)
+# ncRNA (their docs don't specify where these go)
+# pseudogenes (their docs don't specify where these go)
+
+# replace "5UTR" with "5' UTR"
+GeneFeatures$Annotation[GeneFeatures$Annotation == "5UTR"] <- "5' UTR"
+
+# replace "3UTR" with "3' UTR"
+GeneFeatures$Annotation[GeneFeatures$Annotation == "3UTR"] <- "3' UTR"
+
+# order the GeneFeatures$Annotation factor levels
+GeneFeatures$Annotation<-factor(GeneFeatures$Annotation, levels = c("Promoter", "TTS", "Exon", "5' UTR", "3' UTR", "Intron", "Intergenic", "miRNA", "ncRNA", "pseudo"), ordered = TRUE)
+
+GeneFeatures$Percent.of.peaks<-GeneFeatures$Number.of.peaks/sum(GeneFeatures$Number.of.peaks)*100
+
+```
+
+```{r GeneFeatures table}
+GeneFeatures
+```
+
+```{r make figures directory}
+# Create directory for figures
+if (!dir.exists("Figures/")) {
+  dir.create("Figures/", recursive = TRUE)
+}
+```
+
+```{r plot all sites composition of Gene annotations, include=TRUE, fig.width=3, fig.height=2}
+# As bar plots
+ggplot(GeneFeatures, aes(x = Annotation, y = Number.of.peaks, fill = Annotation)) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis(discrete = TRUE, option = "turbo") +
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  labs(x = "Annotation", y = "Number of peaks") +
+  theme(legend.position="none") +
+  scale_y_continuous(trans = "log10", labels = scales::comma) +
+  # remove grid lines
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  # Set plot border thickness
+  theme(panel.border=element_rect(fill=NA, color="black", linewidth=0.8, linetype="solid")) -> p1
+
+# As bar plots
+ggplot(subset(GeneFeatures, !(Annotation %in% c("miRNA","ncRNA","pseudo","5' UTR")) ), aes(x = Annotation, y = Number.of.peaks/1000, fill = Annotation)) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis(discrete = TRUE, option = "turbo") +
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  labs(x = "Annotation", y = NULL) +
+  theme(legend.position="none") +
+  geom_hline(yintercept = 50, linetype = "dashed", color = "black", linewidth=0.25) +
+  # remove grid lines
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  # Set plot border thickness
+  theme(panel.border=element_rect(fill=NA, color="black", linewidth=0.8, linetype="solid")) +
+  # remove x axis labels
+  #theme(axis.text.x = element_blank()) +
+  # remove x axis ticks
+  theme(axis.ticks.x = element_blank()) -> p2
+
+
+# As bar plots
+ggplot(subset(GeneFeatures, !(Annotation %in% c("miRNA","ncRNA","pseudo","5' UTR")) ), aes(x = Annotation, y = Number.of.peaks/1000, fill = Annotation)) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis(discrete = TRUE, option = "turbo") +
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  labs(x = "Annotation", y = NULL) +
+  theme(legend.position="none") +
+  scale_y_continuous(limits=c(0,40), expand = c(0,0)) +
+  geom_vline(xintercept = 6, linetype = "dashed", color = "black", linewidth=0.25) +
+  geom_vline(xintercept = 7, linetype = "dashed", color = "black", linewidth=0.25) +
+  # remove grid lines
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  # Set plot border thickness
+  theme(panel.border=element_rect(fill=NA, color="black", linewidth=0.8, linetype="solid")) -> p3
+
+p3 + scale_y_continuous(
+  limits = c(0, 100), expand = c(0, 0),
+  labels = function(x) paste0("    ", x)  # two spaces in front
+) ->p3
+
+p1
+p2
+p3
+
+# save plots
+ggsave("Figures/GeneFeatures_Annotation_Number_Barplot_whole.png", p1, width = 3, height = 2, dpi = 300)
+ggsave("Figures/GeneFeatures_Annotation_Number_Barplot_Upper.png", p2, width = 3, height = 2, dpi = 300)
+ggsave("Figures/GeneFeatures_Annotation_Number_Barplot_Lower.png", p3, width = 3, height = 2, dpi = 300)
+
+# save as svg
+ggsave("Figures/GeneFeatures_Annotation_Number_Barplot_whole.svg", p1, width = 3, height = 2, dpi = 300)
+ggsave("Figures/GeneFeatures_Annotation_Number_Barplot_Upper.svg", p2, width = 3, height = 2, dpi = 300)
+ggsave("Figures/GeneFeatures_Annotation_Number_Barplot_Lower.svg", p3, width = 3, height = 2, dpi = 300)
+
+
+```
+
+```{r plot all sites composition of Genomic annotations, include=TRUE, fig.width=8, fig.height=2}
+# As bar plots
+ggplot(GenomicFeatues, aes(x = Annotation, y = Number.of.peaks, fill = Annotation)) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis(discrete = TRUE, option = "turbo") +
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  labs(x = "Annotation", y = "cCRE") +
+  theme(legend.position="none") +
+  scale_y_continuous(trans = "log10", labels = scales::comma) +
+  # remove grid lines
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  # Set plot border thickness
+  theme(panel.border=element_rect(fill=NA, color="black", linewidth=0.8, linetype="solid")) -> p4
+
+p4
+
+# save plots
+ggsave("Figures/GenomicFeatures_Annotation_Number_Barplot_whole.png", p4, width = 8, height = 2, dpi = 300)
+
+ggsave("Figures/GenomicFeatures_Annotation_Number_Barplot_whole.svg", p4, width = 8, height = 2, dpi = 300)
+
+GenomicFeatues$Percent.of.peaks<-GenomicFeatues$Number.of.peaks/sum(GenomicFeatues$Number.of.peaks)*100
+```
+
+```{r plot enrichment of Gene annotations, include=TRUE, fig.width=4, fig.height=4}
+ggplot(GeneFeatures, aes(x = Annotation, y = Log2.Ratio..obs.exp., fill = Annotation)) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis(discrete = TRUE, option = "turbo") +
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  labs(x = "Annotation", y = "Log2 Ratio (observed/expected)") +
+  theme(legend.position="none") +
+  # remove grid lines
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  # Set plot border thickness
+  theme(panel.border=element_rect(fill=NA, color="black", linewidth=0.8, linetype="solid")) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth=1) -> p5
+
+p5
+```
+
+```{r GenomicFeatues table}
+GenomicFeatues
+```
+
+```{r plot Log2ratio, fig.width=4, fig.height=4}
+
+ggplot(GenomicFeatues, aes(x = Annotation, y = Log2.Ratio..obs.exp., fill = Annotation)) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis(discrete = TRUE, option = "turbo") +
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  labs(x = "Annotation", y = "Log2 Ratio (observed/expected)") +
+  theme(legend.position="none") +
+  # remove grid lines
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  # Set plot border thickness
+  theme(panel.border=element_rect(fill=NA, color="black", linewidth=0.8, linetype="solid"))
+
+ggplot(GenomicFeatues, aes(x = Annotation, y = LogP.enrichment...values.depleted., fill = Annotation)) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis(discrete = TRUE, option = "turbo") +
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  labs(x = "Annotation", y = "LogP enrichment (values depleted)") +
+  theme(legend.position="none") +
+  # remove grid lines
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  # Set plot border thickness
+  theme(panel.border=element_rect(fill=NA, color="black", linewidth=0.8, linetype="solid"))
+  
+```
+
+```{r plot Percent of peaks, fig.width=8, fig.height=6}
+# pie chart of Total.size..bp.
+ggplot(GenomicFeatues, aes(x = "", y = Total.size..bp., fill = Annotation)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar(theta = "y") +
+  scale_fill_viridis(discrete = TRUE, option = "turbo") +
+  JFMVTheme +
+  labs(x = NULL, y = NULL, fill = "Annotation") +
+  theme(legend.position="right") +
+  # remove grid lines
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  # Set plot border thickness
+  theme(panel.border=element_rect(fill=NA, color="black", linewidth=0.8, linetype="solid"))
+
+```

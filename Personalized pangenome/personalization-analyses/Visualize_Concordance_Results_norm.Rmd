@@ -1,0 +1,591 @@
+---
+title: "Visualize Concordance Results Normalized VCG"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+set.seed(0)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "RI_Personalization/CC_genotype_comparison_to_muga_array/Mosaic_concordance_results_norm/"))
+
+library(ggplot2)
+library(cowplot)
+library(scales)
+library("dplyr")
+library(factoextra)
+library(tidyr)
+source(file.path(REPO_ROOT, "shared-R", "CS_Aesthetic.R"))
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+library(ggrepel)
+library(gridExtra)
+library(reshape2)
+library(ggbeeswarm)
+
+library(ComplexUpset)
+library(dplyr)
+library(patchwork)
+```
+
+```{r import_data}
+# loop through each *_mosaic_concordance.tsv file in the current directory and read it in. Add a column for sample name, which is the part of the filename before "_mosaic_concordance.tsv". i.e. "CC001_mosaic_concordance.tsv" would have sample name "CC001".
+file_list <- list.files(pattern = "*_mosaic_concordance.tsv")
+concordance_df_list <- lapply(file_list, function(file) {
+  df <- read.delim(file)
+  df$sample <- sub("_mosaic_concordance.tsv", "", file)
+  return(df)
+})
+
+# combine all dataframes into one
+concordance_df <- do.call(rbind, concordance_df_list)
+
+# exclude sex chromosomes and mitochondrial chromosome for now, since we don't have expected founder genotypes for those chroms.
+concordance_df <- subset(concordance_df, !chrom %in% c("chrX", "chrY", "chrM"))
+```
+
+```{r plot outcome distribution, fig.width=6.5, fig.height=4}
+# sum n_sites by outcome
+concordance_df %>%
+  group_by(outcome) %>%
+  summarise(total_sites = sum(n_sites)) %>%
+  arrange(desc(total_sites)) -> outcome_summary
+
+ggplot(outcome_summary, aes(x = reorder(outcome, -total_sites), y = total_sites/1e6, fill = outcome)) +
+  geom_col(width = 0.7) +
+  labs(x = "Outcome", y = "Total number of sites (millions)") +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  scale_fill_manual(values = c(
+    "Match" = "#1b9e77",
+    "Mismatch" = "#d95f02",
+    "Missing_Sample" = "#7570b3",
+    "Missing_Founder" = "#e7298a",
+    "Missing_Both" = "#66a61e",
+    "Outside_Mosaic" = "#e6ab02"
+  )) +
+  theme(legend.position = "none") +
+  # add text labels with total_sites (% of total)
+  geom_text(aes(label = paste0(scales::comma(total_sites), " (",round(total_sites / sum(outcome_summary$total_sites) * 100, 2), "%)")), vjust = -0.5, size = 3.5) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+```
+
+```{r plot outcome distribution grouped by sample, fig.width=6.5, fig.height=4}
+# sum n_sites by outcome and sample
+concordance_df %>%
+  group_by(sample, outcome) %>%
+  summarise(total_sites = sum(n_sites)) %>%
+  arrange(sample, desc(total_sites)) -> outcome_sample_summary
+
+ggplot(outcome_sample_summary, aes(x = reorder(outcome, -total_sites), y = total_sites/1e6, fill = outcome)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+  labs(x = "Outcome", y = "Total number of sites (millions)") +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  scale_fill_manual(values = c(
+    "Match" = "#1b9e77",
+    "Mismatch" = "#d95f02",
+    "Missing_Sample" = "#7570b3",
+    "Missing_Founder" = "#e7298a",
+    "Missing_Both" = "#66a61e",
+    "Outside_Mosaic" = "#e6ab02"
+  )) +
+  theme(legend.position = "none") +
+  scale_y_continuous(trans = "log1p", breaks = c(0.1,1,5,10,20,30,40)) +
+  # add mean text labels with total_sites (% of total) for each outcome across all samples
+  stat_summary(aes(label = paste0(scales::comma(..y..), " (",round(..y.. / sum(outcome_sample_summary$total_sites) * 100, 4), "%)")), fun = mean, geom = "text", vjust = -0.5, size = 3.5) +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) -> p1
+
+p1
+
+# save as svg
+ggsave(
+  filename = "../Outcome_breakdown_boxplot_norm.svg",
+  plot = p1,
+  device = "svg",
+  width = 6.5,
+  height = 4,
+  units = "in"
+)
+```
+
+```{r viz_heatmap, fig.width=14, fig.height=8}
+chrom_levels <- c(paste0("chr", 1:19), "chrX", "chrY", "chrM")
+concordance_df <- concordance_df %>%
+  mutate(chrom = factor(chrom, levels = chrom_levels))
+
+df_rate <- concordance_df %>%
+  group_by(chrom, expected_class) %>%
+  summarise(
+    n_match = sum(n_sites[outcome == "Match"]),
+    n_mismatch = sum(n_sites[outcome == "Mismatch"]),
+    denom = n_match + n_mismatch,
+    concordance = ifelse(denom > 0, n_match / denom, NA_real_),
+    denom_sites = denom,
+    .groups = "drop"
+  )
+
+# split df_rate by expected_class, where the letter containing classes into Nonmissing, and the number containing classes Missing.
+## So any expected_class containing A:H is Nonmissing, and any expected_class containing 1:9 is Missing. Partial match accepted as Nonmissing.
+df_rate <- df_rate %>%
+  mutate(expected_class_group = ifelse(grepl("[A-H]", expected_class), "Nonmissing", "Missing"))
+
+Nonmissing <- subset(df_rate, expected_class_group == "Nonmissing")
+
+ggplot(Nonmissing, aes(x = expected_class, y = chrom, fill = concordance)) +
+  geom_tile() +
+  labs(x = "Expected founder pair (phase ignored)", y = "Chromosome", fill = "Concordance") +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_fill_viridis_c(option = "plasma")
+
+ggplot(Nonmissing, aes(x = expected_class, y = chrom, fill = denom_sites/1e6)) +
+  geom_tile() +
+  labs(x = "Expected founder pair (phase ignored)", y = "Chromosome", fill = "Sites") +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_fill_viridis_c(option = "magma")
+
+```
+
+```{r viz_heatmap grouped by sample, fig.width=24, fig.height=24}
+df_rate_sample <- concordance_df %>%
+  group_by(sample, chrom, expected_class) %>%
+  summarise(
+    n_match = sum(n_sites[outcome == "Match"]),
+    n_mismatch = sum(n_sites[outcome == "Mismatch"]),
+    denom = n_match + n_mismatch,
+    concordance = ifelse(denom > 0, n_match / denom, NA_real_),
+    denom_sites = denom,
+    .groups = "drop"
+  ) %>%
+  mutate(expected_class_group = ifelse(grepl("[A-H]", expected_class), "Nonmissing", "Missing"))
+
+ggplot(subset(df_rate_sample, expected_class_group == "Nonmissing"), aes(x = expected_class, y = chrom, fill = concordance)) +
+  geom_tile() +
+  labs(x = "Expected founder pair (phase ignored)", y = "Chromosome", fill = "Concordance") +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  facet_wrap(~ sample, ncol = 6, scale = "free") +
+  scale_fill_viridis_c(option = "plasma")
+
+```
+
+```{r plot concordance vs denom_sites, fig.width=4, fig.height=4}
+ggplot(subset(df_rate_sample, expected_class_group == "Nonmissing"), aes(x = denom_sites/1e6, y = concordance)) +
+  geom_point(stroke=0, size=1.5) +
+  labs(x = "Number of sites (M)", y = "Concordance") +
+  theme_cowplot() +
+  scale_x_continuous(expand = c(0,0), breaks = c(0, 0.5, 1, 2, 3)) +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 1)) +
+  geom_vline(xintercept = 0.1, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = 0.95, linetype = "dashed", color = "red") -> p5
+
+p5
+
+ggplot(subset(df_rate_sample, expected_class_group == "Nonmissing"), aes(x = denom_sites/1e6, y = concordance)) +
+  geom_point(stroke=0, size=1.5) +
+  labs(x = "Number of sites (M)", y = "Concordance") +
+  theme_cowplot() +
+  ggrepel::geom_text_repel(data = subset(df_rate_sample, expected_class_group == "Nonmissing" & !is.na(concordance) & concordance < 0.98), aes(label = chrom), size = 3, nudge_x = 0.5) +
+  scale_x_continuous(expand = c(0,0), breaks = c(0, 0.1, 0.5, 1, 2, 3)) +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 1)) +
+  geom_vline(xintercept = 0.1, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = 0.95, linetype = "dashed", color = "red")
+
+
+ggplot(subset(df_rate_sample, expected_class_group == "Nonmissing"), aes(x = denom_sites/1e6, y = concordance)) +
+  geom_point(stroke=0, size=1.5) +
+  labs(x = "Number of sites (M)", y = "Concordance") +
+  theme_cowplot() +
+  ggrepel::geom_text_repel(data = subset(df_rate_sample, expected_class_group == "Nonmissing" & !is.na(concordance) & concordance < 0.98), aes(label = expected_class), size = 3, nudge_x = 0.5) +
+  scale_x_continuous(expand = c(0,0), breaks = c(0, 0.1, 0.5, 1, 2, 3)) +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 1)) +
+  geom_vline(xintercept = 0.1, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = 0.95, linetype = "dashed", color = "red")
+
+
+ggplot(subset(df_rate_sample, expected_class_group == "Nonmissing"), aes(x = denom_sites/1e6, y = concordance)) +
+  geom_point(stroke=0, size=1.5) +
+  labs(x = "Number of sites (M)", y = "Concordance") +
+  theme_cowplot() +
+  ggrepel::geom_text_repel(data = subset(df_rate_sample, expected_class_group == "Nonmissing" & !is.na(concordance) & concordance < 0.98), aes(label = sample), size = 3, nudge_x = 0.5) +
+  scale_x_continuous(expand = c(0,0), breaks = c(0, 0.1, 0.5, 1, 2, 3)) +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 1)) +
+  geom_vline(xintercept = 0.1, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = 0.95, linetype = "dashed", color = "red")
+
+# save as svg
+ggsave(
+  filename = "../Concordance_vs_Sites_Scatterplot_norm.svg",
+  plot = p5,
+  device = "svg",
+  width = 4,
+  height = 4,
+  units = "in"
+)
+
+# what fraction of diplotypes are <100K sites & <95% concordance?
+low_quality_fraction <- nrow(subset(df_rate_sample, expected_class_group == "Nonmissing" & denom_sites < 1e5 & concordance < 0.95)) / nrow(subset(df_rate_sample, expected_class_group == "Nonmissing"))
+print(paste0("Fraction of Nonmissing diplotypes with <100K sites and <95% concordance: ", round(low_quality_fraction * 100, 2), "%"))
+
+# what fraction of diplotypes are <100K sites but >95% concordance?
+low_quality_high_concordance_fraction <- nrow(subset(df_rate_sample, expected_class_group == "Nonmissing" & denom_sites < 1e5 & concordance >= 0.95)) / nrow(subset(df_rate_sample, expected_class_group == "Nonmissing"))
+print(paste0("Fraction of Nonmissing diplotypes with <100K sites but >=95% concordance: ", round(low_quality_high_concordance_fraction * 100, 2), "%"))
+
+# what fraction of diplotypes are >100K sites but <95% concordance?
+high_quality_low_concordance_fraction <- nrow(subset(df_rate_sample, expected_class_group == "Nonmissing" & denom_sites >= 1e5 & concordance < 0.95)) / nrow(subset(df_rate_sample, expected_class_group == "Nonmissing"))
+print(paste0("Fraction of Nonmissing diplotypes with >=100K sites but <95% concordance: ", round(high_quality_low_concordance_fraction * 100, 2), "%"))
+
+# what fraction of diplotypes are >100K sites and >95% concordance?
+high_quality_high_concordance_fraction <- nrow(subset(df_rate_sample, expected_class_group == "Nonmissing" & denom_sites >= 1e5 & concordance >= 0.95)) / nrow(subset(df_rate_sample, expected_class_group == "Nonmissing"))
+print(paste0("Fraction of Nonmissing diplotypes with >=100K sites and >=95% concordance: ", round(high_quality_high_concordance_fraction * 100, 2), "%"))
+```
+
+```{r plot concordance vs denom_sites grouped by sample, fig.width=12, fig.height=12}
+ggplot(subset(df_rate_sample, expected_class_group == "Nonmissing"), aes(x = denom_sites/1e6, y = concordance)) +
+  geom_point(stroke=0, size=1.5) +
+  labs(x = "Number of sites (M)", y = "Concordance") +
+  theme_cowplot() +
+  ggrepel::geom_text_repel(data = subset(df_rate_sample, expected_class_group == "Nonmissing" & !is.na(concordance) & concordance < 0.98), aes(label = expected_class), size = 3, nudge_x = 0.5) +
+  facet_wrap(~ sample, ncol = 6) +
+  scale_x_continuous(expand = c(0,0), breaks = c(0, 0.5, 1, 2, 3)) +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 1)) +
+  geom_vline(xintercept = 0.1, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = 0.95, linetype = "dashed", color = "red")
+
+ggplot(subset(df_rate_sample, expected_class_group == "Nonmissing"), aes(x = denom_sites/1e6, y = concordance)) +
+  geom_point(stroke=0, size=1.5) +
+  labs(x = "Number of sites (M)", y = "Concordance") +
+  theme_cowplot() +
+  ggrepel::geom_text_repel(data = subset(df_rate_sample, expected_class_group == "Nonmissing" & !is.na(concordance) & concordance < 0.98), aes(label = chrom), size = 3, nudge_x = 0.5) +
+  facet_wrap(~ sample, ncol = 6) +
+  scale_x_continuous(expand = c(0,0), breaks = c(0, 0.5, 1, 2, 3)) +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 1)) +
+  geom_vline(xintercept = 0.1, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = 0.95, linetype = "dashed", color = "red")
+
+```
+
+```{r plot heatmap with n_sites instead of concordance split by chrom, fig.width=8.5, fig.height=10.5}
+# make wide to long to make n_match and n_mismatch in the same column,
+Nonmissing[,c("chrom","expected_class","n_match","n_mismatch")] %>%
+  pivot_longer(cols = c("n_match", "n_mismatch"), names_to = "match_status", values_to = "n_sites") -> Nonmissing_long
+
+# split expected_class by "/" so we have hap1 & hap2 in separate columns, and then make expected_class_group column as before.
+Nonmissing_long <- Nonmissing_long %>%
+  separate(expected_class, into = c("hap1", "hap2"), sep = "/") %>%
+  mutate(expected_class_group = ifelse(grepl("[A-H]", hap1) | grepl("[A-H]", hap2), "Nonmissing", "Missing"))
+
+ggplot(subset(Nonmissing_long, match_status=="n_match"), aes(x = hap1, y = hap2, fill = n_sites/1e6)) +
+  geom_tile() +
+  labs(x = "Haplotype 1", y = "Haplotype 2", fill = "#matching sites (M)", title = "Matched sites") +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  facet_wrap(~ chrom, ncol = 4) +
+  # rotate lengend x axis text and move to bottom
+  theme(legend.position = "bottom", legend.text = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_fill_viridis_c(option = "magma")
+
+ggplot(subset(Nonmissing_long, match_status=="n_mismatch"), aes(x = hap1, y = hap2, fill = n_sites/1e3)) +
+  geom_tile() +
+  labs(x = "Haplotype 1", y = "Haplotype 2", fill = "#mismatching sites (K)", title = "Unmatched sites") +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  facet_wrap(~ chrom, ncol = 4) +
+  theme(legend.position = "bottom", legend.text = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_fill_viridis_c(option = "magma")
+```
+
+```{r plot heatmap with n_sites instead of concordance, fig.width=5, fig.height=5}
+# sum across chrom and expected_class to get total n_match and n_mismatch for each hap1/hap2 combination, and then make heatmap of n_sites for n_match and n_mismatch.
+Nonmissing_long %>%
+  group_by(hap1, hap2, match_status) %>%
+  summarise(n_sites = sum(n_sites, na.rm = TRUE), .groups = "drop") -> Nonmissing_hap_summary
+
+ggplot(subset(Nonmissing_hap_summary, match_status=="n_match"), aes(x = hap1, y = hap2, fill = n_sites/1e6)) +
+  geom_tile() +
+  labs(x = "Haplotype 1", y = "Haplotype 2", fill = "#matching sites (M)", title = "Matched sites") +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  # rotate lengend x axis text and move to bottom
+  theme(legend.position = "bottom", legend.text = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_fill_viridis_c(option = "magma")
+
+ggplot(subset(Nonmissing_hap_summary, match_status=="n_mismatch"), aes(x = hap1, y = hap2, fill = n_sites/1e6)) +
+  geom_tile() +
+  labs(x = "Haplotype 1", y = "Haplotype 2", fill = "#mismatching sites (M)", title = "Unmatched sites") +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = "bottom", legend.text = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_fill_viridis_c(option = "plasma")
+```
+
+```{r bubble_matrix, fig.width=4, fig.height=4}
+founders <- LETTERS[1:8]  # A-H
+
+# collapse across chromosomes (genome-wide)
+df_rate_all <- df_rate %>%
+  group_by(expected_class) %>%
+  summarise(
+    n_match = mean(n_match, na.rm = TRUE),
+    n_mismatch = mean(n_mismatch, na.rm = TRUE),
+    denom_sites = n_match + n_mismatch,
+    concordance = ifelse(denom_sites > 0, n_match / denom_sites, NA_real_),
+    .groups = "drop"
+  )
+
+bubble_df <- df_rate_all %>%
+  filter(grepl("[A-H]", expected_class)) %>%
+  tidyr::separate(expected_class, into = c("hap1","hap2"), sep = "/", remove = FALSE) %>%
+  mutate(
+    hap1 = factor(hap1, levels = founders),
+    hap2 = factor(hap2, levels = founders),
+    i = as.integer(hap1),
+    j = as.integer(hap2)
+  ) %>%
+  filter(!is.na(i), !is.na(j), j >= i)
+
+# make a full grid so empty cells still show as squares
+grid_df <- expand.grid(
+  hap1 = factor(founders, levels = founders),
+  hap2 = factor(founders, levels = founders)
+) %>%
+  mutate(i = as.integer(hap1), j = as.integer(hap2)) %>%
+  filter(j >= i)
+
+
+
+ggplot() +
+  # background grid
+  geom_tile(
+    data = grid_df,
+    aes(x = hap1, y = hap2),
+    fill = "white",
+    color = "grey85",
+    linewidth = 0.4
+  ) +
+  # circles
+  geom_point(
+    data = bubble_df,
+    aes(x = hap1, y = hap2, size = denom_sites/1e6, fill = concordance),
+    shape = 21,
+    color = "grey20",
+    stroke = 1,
+    alpha = 0.9
+  ) +
+  coord_fixed() +
+  scale_y_discrete(limits = rev(founders), expand = c(0,0)) +  # gives the “matrix” feel
+  scale_x_discrete(expand = c(0,0)) +
+  scale_size_area(max_size = 6) +
+  scale_fill_viridis_c(option = "turbo", na.value = "grey90") +
+  labs(x = "Haplotype 1", y = "Haplotype 2", size = "Sites", fill="Concordance") +
+  theme_cowplot() +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    panel.grid = element_blank()
+  ) -> p2
+
+p2
+# save as svg
+ggsave(
+  filename = "../Concordance_Bubble_Matrix_norm.svg",
+  plot = p2,
+  device = "svg",
+  width = 4,
+  height = 4,
+  units = "in"
+)
+
+```
+
+```{r plot heatmap with n_sites instead of concordance grouped by sample, fig.width=28, fig.height=52}
+# make wide to long to make n_match and n_mismatch in the same column, and also include sample column
+df_rate_sample_long <- df_rate_sample %>%
+  pivot_longer(cols = c("n_match", "n_mismatch"), names_to = "match_status", values_to = "n_sites")
+
+# split expected_class by "/" so we have hap1 & hap2 in separate columns, and then make expected_class_group column as before.
+df_rate_sample_long <- df_rate_sample_long %>%
+  separate(expected_class, into = c("hap1", "hap2"), sep = "/") %>%
+  mutate(expected_class_group = ifelse(grepl("[A-H]", hap1) | grepl("[A-H]", hap2), "Nonmissing", "Missing"))
+
+ggplot(subset(df_rate_sample_long, expected_class_group == "Nonmissing" & match_status=="n_match"), aes(x = hap1, y = hap2, fill = n_sites/1e6)) +
+  geom_tile() +
+  labs(x = "Haplotype 1", y = "Haplotype 2", fill = "#matching sites (M)", title = "Matched sites") +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  facet_grid(sample ~ chrom, switch = "both", scales = "free") +
+  # rotate lengend x axis text and move to bottom
+  theme(legend.position = "bottom", legend.text = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  # add grid lines between samples and chroms
+  theme(panel.grid.major = element_line(color = "black", size = 0.5), panel.grid.minor = element_blank()) +
+  scale_fill_viridis_c(option = "plasma")
+
+ggplot(subset(df_rate_sample_long, expected_class_group == "Nonmissing" & match_status=="n_mismatch"), aes(x = hap1, y = hap2, fill = n_sites/1e3)) +
+  geom_tile() +
+  labs(x = "Haplotype 1", y = "Haplotype 2", fill = "#mismatching sites (K)", title = "Unmatched sites") +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  facet_grid(sample ~ chrom, switch = "both", scales = "free") +
+  theme(legend.position = "bottom", legend.text = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(panel.grid.major = element_line(color = "black", size = 0.5), panel.grid.minor = element_blank()) +
+  scale_fill_viridis_c(option = "magma")
+
+```
+
+```{r plot distribution of concordance rates for Nonmissing classes, fig.width=6, fig.height=4}
+# split by expected_class
+ggplot(subset(df_rate, expected_class_group == "Nonmissing"), aes(x = expected_class, y = concordance)) +
+  geom_boxplot() +
+  labs(x = "Expected founder pair (phase ignored)", y = "Concordance") +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  ggrepel::geom_text_repel(data = subset(df_rate, expected_class_group == "Nonmissing" & !is.na(concordance) & concordance < 0.98), aes(label = chrom), size = 3, nudge_x = 0.5)
+
+# split by chrom
+ggplot(subset(df_rate, expected_class_group == "Nonmissing"), aes(x = chrom, y = concordance)) +
+  geom_boxplot() +
+  labs(x = "Chromosome", y = "Concordance") +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  ggrepel::geom_text_repel(data = subset(df_rate, expected_class_group == "Nonmissing" & !is.na(concordance) & concordance < 0.98), aes(label = expected_class), size = 3, nudge_x = 0.5)
+```
+
+```{r plot distribution of concordance rates for Nonmissing classes grouped by sample, fig.width=24, fig.height=16}
+# split by expected_class and sample
+ggplot(subset(df_rate_sample, expected_class_group == "Nonmissing"), aes(x = expected_class, y = concordance)) +
+  geom_boxplot() +
+  labs(x = "Expected founder pair (phase ignored)", y = "Concordance") +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  facet_wrap(~ sample, ncol = 6, scale = "free_x") +
+  ggrepel::geom_text_repel(data = subset(df_rate_sample, expected_class_group == "Nonmissing" & !is.na(concordance) & concordance < 0.98), aes(label = chrom), size = 3, nudge_x = 0.5)
+
+# split by chrom and sample
+ggplot(subset(df_rate_sample, expected_class_group == "Nonmissing"), aes(x = chrom, y = concordance)) +
+  geom_boxplot() +
+  labs(x = "Chromosome", y = "Concordance") +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  facet_wrap(~ sample, ncol = 6, scale = "free_x") +
+  ggrepel::geom_text_repel(data = subset(df_rate_sample, expected_class_group == "Nonmissing" & !is.na(concordance) & concordance < 0.98), aes(label = expected_class), size = 3, nudge_x = 0.5)
+```
+
+```{r determine overall concordance rate for Nonmissing classes}
+# calculate overall concordance rate for Nonmissing classes, where we sum n_match and n_mismatch across all chrom and expected_class, and then calculate concordance as sum(n_match) / (sum(n_match) + sum(n_mismatch))
+overall_n_match <- sum(df_rate$n_match[df_rate$expected_class_group == "Nonmissing"], na.rm = TRUE)
+overall_n_mismatch <- sum(df_rate$n_mismatch[df_rate$expected_class_group == "Nonmissing"], na.rm = TRUE)
+overall_concordance <- overall_n_match / (overall_n_match + overall_n_mismatch)
+
+print(paste0("Overall concordance rate for Nonmissing classes: ", round(overall_concordance * 100, 2), "%"))
+```
+
+```{r determine overall concordance rate for Nonmissing classes grouped by sample, fig.width=4, fig.height=3.5}
+# calculate overall concordance rate for Nonmissing classes grouped by sample, where we sum n_match and n_mismatch across all chrom and expected_class for each sample, and then calculate concordance as sum(n_match) / (sum(n_match) + sum(n_mismatch)) for each sample
+overall_concordance_sample <- df_rate_sample %>%
+  filter(expected_class_group == "Nonmissing") %>%
+  group_by(sample) %>%
+  summarise(
+    overall_n_match = sum(n_match, na.rm = TRUE),
+    overall_n_mismatch = sum(n_mismatch, na.rm = TRUE),
+    overall_concordance = overall_n_match / (overall_n_match + overall_n_mismatch)
+  )
+
+print(overall_concordance_sample)
+
+# plot distribution of overall concordance rates across samples as histogram
+ggplot(overall_concordance_sample, aes(x = overall_concordance)) +
+  geom_histogram(binwidth = 0.001, fill = "#1b9e77", color = "black") +
+  labs(x = "Overall concordance rate", y = "Number of samples") +
+  theme_cowplot() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 0.1), expand = c(0,0)) -> p3
+
+p3
+
+# save as svg
+ggsave(
+  filename = "../Overall_Concordance_Histogram_norm.svg",
+  plot = p3,
+  device = "svg",
+  width = 4,
+  height = 3.5,
+  units = "in"
+)
+
+# Concorance range
+print(paste0("Range of overall concordance rates: ", round(min(overall_concordance_sample$overall_concordance) * 100, 2), "% - ", round(max(overall_concordance_sample$overall_concordance) * 100, 2), "%"))
+
+print("Samples with overall concordance rate for Nonmissing classes < 98%:")
+subset(overall_concordance_sample, overall_concordance<0.98)
+```
+
+```{r detrmine rate of heterozygosity overall}
+# calculate overall heterozygosity rate. where we sum n_sites in Nonmissing_long for all hap1 != hap2, and then divide by total n_sites in Nonmissing_long.
+total_n_sites <- sum(Nonmissing_long$n_sites, na.rm = TRUE)
+heterozygous_n_sites <- sum(Nonmissing_long$n_sites[Nonmissing_long$hap1 != Nonmissing_long$hap2], na.rm = TRUE)
+heterozygosity_rate <- heterozygous_n_sites / total_n_sites
+
+print(paste0("Overall heterozygosity rate: ", round(heterozygosity_rate * 100, 2), "%"))
+print(paste0("Total number of sites in Nonmissing classes: ", scales::comma(total_n_sites)))
+```
+
+```{r detrmine rate of heterozygosity overall grouped by sample, fig.width=4, fig.height=3.5}
+# calculate heterozygosity rate grouped by sample, where we sum n_sites in df_rate_sample_long for all hap1 != hap2 for each sample, and then divide by total n_sites in df_rate_sample_long for each sample.
+heterozygosity_rate_sample <- df_rate_sample_long %>%
+  filter(expected_class_group == "Nonmissing") %>%
+  group_by(sample) %>%
+  summarise(
+    total_n_sites = sum(n_sites, na.rm = TRUE),
+    heterozygous_n_sites = sum(n_sites[hap1 != hap2], na.rm = TRUE),
+    heterozygosity_rate = heterozygous_n_sites / total_n_sites
+  )
+
+print(heterozygosity_rate_sample)
+
+# plot distribution of heterozygosity rates across samples as histogram
+ggplot(heterozygosity_rate_sample, aes(x = heterozygosity_rate)) +
+  geom_histogram(binwidth = 0.01, fill = "grey", color = "black") +
+  labs(x = "Heterozygosity rate", y = "Number of samples") +
+  theme_cowplot() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 0.1), expand = c(0,0)) -> p4
+
+p4
+
+# save as svg
+ggsave(
+  filename = "../Heterozygosity_Rate_Histogram_norm.svg",
+  plot = p4,
+  device = "svg",
+  width = 4,
+  height = 3.5,
+  units = "in"
+)
+
+# how many 0% heterozygosity rate?
+subset(heterozygosity_rate_sample, heterozygosity_rate==0)
+
+# how many 0-1% heterozygosity rate?
+print(paste0("Number of samples with heterozygosity rate between 0 and 1%: ", sum(heterozygosity_rate_sample$heterozygosity_rate > 0 & heterozygosity_rate_sample$heterozygosity_rate <= 0.01)))
+subset(heterozygosity_rate_sample, heterozygosity_rate > 0 & heterozygosity_rate <= 0.01)
+
+# how many >7.5% heterozygosity rate?
+print(paste0("Number of samples with heterozygosity rate > 7.5%: ", sum(heterozygosity_rate_sample$heterozygosity_rate > 0.075)))
+subset(heterozygosity_rate_sample, heterozygosity_rate > 0.075)
+
+# heterozygosity rate range
+print(paste0("Range of heterozygosity rates: ", round(min(heterozygosity_rate_sample$heterozygosity_rate) * 100, 2), "% - ", round(max(heterozygosity_rate_sample$heterozygosity_rate) * 100, 2), "%"))
+
+```

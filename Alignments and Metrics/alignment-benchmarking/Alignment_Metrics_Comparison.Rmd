@@ -1,0 +1,762 @@
+---
+title: "Alignment Metrics Comparison: GRCm38 · mT2T · Founder Pangenome"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+set.seed(0)
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Alignment_Benchmarking/"))
+
+library(ggplot2)
+library(cowplot)
+library(scales)
+library(dplyr)
+library(tidyr)
+library(ggrepel)
+library(ggbeeswarm)
+library(data.table)
+library(stringr)
+library(patchwork)
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+
+# NULL/NA-coalescing operator used by row builders
+`%||%` <- function(a, b) {
+    if (is.null(a) || length(a) == 0) return(b)
+    if (is.atomic(a) && length(a) == 1 && is.na(a)) return(b)
+    a
+}
+```
+
+# Configuration
+
+```{r analysis-settings}
+METRICS_DIR <- "Metrics"
+FIG_DIR     <- "figures"
+dir.create(FIG_DIR, recursive = TRUE, showWarnings = FALSE)
+
+condition_order <- c(
+    "GRCm38 + BWA",
+    "GRCm38 + Giraffe (pre-surj)",
+    "GRCm38 + Giraffe (surj)",
+    "mT2T + BWA",
+    "mT2T + Giraffe (pre-surj)",
+    "mT2T + Giraffe (surj)",
+    "Founders Pangenome (pre-surj)",
+    "Founders Pangenome (surj)"
+)
+
+condition_palette <- c(
+    "GRCm38 + BWA"                   = "#4a7c8a",
+    "GRCm38 + Giraffe (pre-surj)"    = "#2e5966",
+    "GRCm38 + Giraffe (surj)"        = "#8bbcc4",
+    "mT2T + BWA"                     = "#d4883a",
+    "mT2T + Giraffe (pre-surj)"      = "#c44e52",
+    "mT2T + Giraffe (surj)"          = "#e8998d",
+    "Founders Pangenome (pre-surj)"  = "#6a5acd",
+    "Founders Pangenome (surj)"      = "#b0a8d8"
+)
+
+condition_short <- c(
+    "GRCm38 + BWA"                   = "GRCm38\nBWA",
+    "GRCm38 + Giraffe (pre-surj)"    = "GRCm38\nGir (pre)",
+    "GRCm38 + Giraffe (surj)"        = "GRCm38\nGir (surj)",
+    "mT2T + BWA"                     = "mT2T\nBWA",
+    "mT2T + Giraffe (pre-surj)"      = "mT2T\nGir (pre)",
+    "mT2T + Giraffe (surj)"          = "mT2T\nGir (surj)",
+    "Founders Pangenome (pre-surj)"  = "Founders\n(pre)",
+    "Founders Pangenome (surj)"      = "Founders\n(surj)"
+)
+
+# pre-surjection conditions (used by vg_long, vg_events, vg panels)
+vg_conds <- c(
+    "GRCm38 + Giraffe (pre-surj)",
+    "mT2T + Giraffe (pre-surj)",
+    "Founders Pangenome (pre-surj)"
+)
+```
+
+# Parsers
+
+```{r parsers}
+# samtools stats: pull SN lines
+parse_samtools_stats <- function(path) {
+    lines <- readLines(path)
+    sn <- grep("^SN\t", lines, value = TRUE)
+    kv <- str_match(sn, "^SN\t([^:]+):\t([^\t#]+)")
+    vals <- suppressWarnings(as.numeric(trimws(kv[, 3])))
+    setNames(as.list(vals), trimws(kv[, 2]))
+}
+
+# samtools flagstat: primary, mapped, paired, singletons, etc.
+parse_flagstats <- function(path) {
+    lines <- readLines(path)
+    out <- list()
+    get_count <- function(pattern) {
+        hit <- grep(pattern, lines, value = TRUE)
+        if (length(hit) == 0) return(NA_real_)
+        as.numeric(sub("^(\\d+).*", "\\1", hit[1]))
+    }
+    get_pct <- function(pattern) {
+        hit <- grep(pattern, lines, value = TRUE)
+        if (length(hit) == 0) return(NA_real_)
+        m <- regmatches(hit[1], regexpr("\\(([0-9.]+)%", hit[1]))
+        if (length(m) == 0) return(NA_real_)
+        as.numeric(sub("\\(([0-9.]+)%.*", "\\1", m))
+    }
+    out$total           <- get_count("in total")
+    out$primary         <- get_count("^[0-9]+ \\+ [0-9]+ primary$")
+    out$primary_mapped  <- get_count("primary mapped")
+    out$primary_mapped_pct <- get_pct("primary mapped")
+    out$properly_paired <- get_count("properly paired")
+    out$properly_paired_pct <- get_pct("properly paired")
+    out$singletons      <- get_count("singletons")
+    out$singletons_pct  <- get_pct("singletons")
+    out$diff_chr_mapq5  <- get_count("with mate mapped to a different chr \\(mapQ>=5\\)")
+    out
+}
+
+# custom-metrics.txt: primary/mapped/paired + MAPQ60/gapless/perfect
+parse_custom_metrics <- function(path) {
+    lines <- readLines(path)
+    pick <- function(pattern) {
+        hit <- grep(pattern, lines, value = TRUE)
+        if (length(hit) == 0) return(NA_real_)
+        as.numeric(sub(".*:\\s*", "", hit[1]))
+    }
+    list(
+        total_primary       = pick("^Total primary reads"),
+        mapped_reads        = pick("^Mapped reads"),
+        properly_paired     = pick("^Properly paired reads"),
+        mapq60              = pick("^MAPQ = 60 reads"),
+        gapless             = pick("^Gapless reads"),
+        perfect             = pick("^Perfect reads")
+    )
+}
+
+# vg stats: pre-surjection graph metrics
+parse_vg_stats <- function(path) {
+    lines <- readLines(path)
+    pick <- function(pattern) {
+        hit <- grep(pattern, lines, value = TRUE)
+        if (length(hit) == 0) return(NA_real_)
+        as.numeric(sub(".*:\\s*([0-9]+).*", "\\1", hit[1]))
+    }
+    mq_line <- grep("^Mapping quality:", lines, value = TRUE)
+    as_line <- grep("^Alignment score:", lines, value = TRUE)
+    mq_mean <- if (length(mq_line)) as.numeric(sub(".*mean ([0-9.]+).*", "\\1", mq_line)) else NA_real_
+    mq60    <- if (length(mq_line)) as.numeric(sub(".*max\\s+\\d+\\s*\\((\\d+).*", "\\1", mq_line)) else NA_real_
+    as_mean <- if (length(as_line)) as.numeric(sub(".*mean ([0-9.]+).*", "\\1", as_line)) else NA_real_
+    list(
+        total_alignments       = pick("^Total alignments"),
+        total_primary          = pick("^Total primary"),
+        total_aligned          = pick("^Total aligned"),
+        total_perfect          = pick("^Total perfect"),
+        total_gapless          = pick("^Total gapless"),
+        total_properly_paired  = pick("^Total properly paired"),
+        mapq_mean              = mq_mean,
+        mapq60                 = mq60,
+        aln_score_mean         = as_mean,
+        substitutions_bp       = pick("^Substitutions"),
+        insertions_bp          = pick("^Insertions"),
+        deletions_bp           = pick("^Deletions"),
+        softclips_bp           = pick("^Softclips")
+    )
+}
+```
+
+# Row builders
+
+```{r builders}
+# For samtools-stats-based conditions (BWA and post-surj Giraffe/Founders)
+row_samtools <- function(sample, condition, stats, flags, custom) {
+    total <- stats[["raw total sequences"]]
+    if (is.null(total) || is.na(total) || total == 0) total <- 1
+    data.table(
+        sample               = sample,
+        condition            = condition,
+        total_reads          = total,
+        mapping_rate         = 100 * (stats[["reads mapped"]] %||% 0) / total,
+        properly_paired_rate = 100 * (stats[["reads properly paired"]] %||% 0) / total,
+        error_rate           = stats[["error rate"]] %||% NA_real_,
+        mq0_rate             = 100 * (stats[["reads MQ0"]] %||% 0) / total,
+        insert_size_avg      = stats[["insert size average"]] %||% NA_real_,
+        mapq60_rate          = 100 * (custom$mapq60 %||% 0) / total,
+        gapless_rate         = 100 * (custom$gapless %||% 0) / total,
+        perfect_rate         = 100 * (custom$perfect %||% 0) / total,
+        singletons_rate      = flags$singletons_pct %||% NA_real_,
+        diff_chr_mapq5       = flags$diff_chr_mapq5 %||% NA_real_,
+        aln_score_mean       = NA_real_,
+        mapq_mean            = NA_real_,
+        substitutions_bp     = NA_real_,
+        insertions_bp        = NA_real_,
+        deletions_bp         = NA_real_,
+        softclips_bp         = NA_real_
+    )
+}
+
+# For vg-stats-based conditions (pre-surj Giraffe/Founders)
+row_vg <- function(sample, condition, vg) {
+    total <- vg$total_primary
+    if (is.null(total) || is.na(total) || total == 0) total <- 1
+    data.table(
+        sample               = sample,
+        condition            = condition,
+        total_reads          = total,
+        mapping_rate         = 100 * (vg$total_aligned %||% 0) / total,
+        properly_paired_rate = 100 * (vg$total_properly_paired %||% 0) / total,
+        error_rate           = NA_real_,
+        mq0_rate             = NA_real_,
+        insert_size_avg      = NA_real_,
+        mapq60_rate          = 100 * (vg$mapq60 %||% 0) / total,
+        gapless_rate         = 100 * (vg$total_gapless %||% 0) / total,
+        perfect_rate         = 100 * (vg$total_perfect %||% 0) / total,
+        singletons_rate      = NA_real_,
+        diff_chr_mapq5       = NA_real_,
+        aln_score_mean       = vg$aln_score_mean,
+        mapq_mean            = vg$mapq_mean,
+        substitutions_bp     = vg$substitutions_bp %||% NA_real_,
+        insertions_bp        = vg$insertions_bp %||% NA_real_,
+        deletions_bp         = vg$deletions_bp %||% NA_real_,
+        softclips_bp         = vg$softclips_bp %||% NA_real_
+    )
+}
+
+```
+
+# Load data
+
+```{r load}
+samples <- sort(unique(sub("\\.merged\\.stats\\.txt$", "",
+                           list.files(file.path(METRICS_DIR, "GRCm38_BWA"),
+                                      pattern = "\\.merged\\.stats\\.txt$"))))
+
+safe <- function(expr) tryCatch(expr, error = function(e) NULL)
+
+rows <- list()
+
+for (s in samples) {
+    # 1. GRCm38 + BWA
+    p <- file.path(METRICS_DIR, "GRCm38_BWA")
+    if (file.exists(file.path(p, paste0(s, ".merged.stats.txt")))) {
+        st <- safe(parse_samtools_stats(file.path(p, paste0(s, ".merged.stats.txt"))))
+        fl <- safe(parse_flagstats(file.path(p, paste0(s, ".merged.flagstats"))))
+        cm <- safe(parse_custom_metrics(file.path(p, paste0(s, ".merged.custom-metrics.txt"))))
+        if (!is.null(st)) rows[[length(rows) + 1]] <- row_samtools(s, "GRCm38 + BWA", st, fl, cm)
+    }
+
+    # 2. mT2T + BWA
+    p <- file.path(METRICS_DIR, "mT2T_BWA")
+    if (file.exists(file.path(p, paste0(s, ".merged.stats.txt")))) {
+        st <- safe(parse_samtools_stats(file.path(p, paste0(s, ".merged.stats.txt"))))
+        fl <- safe(parse_flagstats(file.path(p, paste0(s, ".merged.flagstats"))))
+        cm <- safe(parse_custom_metrics(file.path(p, paste0(s, ".merged.custom-metrics.txt"))))
+        if (!is.null(st)) rows[[length(rows) + 1]] <- row_samtools(s, "mT2T + BWA", st, fl, cm)
+    }
+
+    # 3. GRCm38 + Giraffe (surj)
+    p <- file.path(METRICS_DIR, "GRCm38_Giraffe")
+    stf <- file.path(p, paste0("md.renamed.sorted.", s, ".real.mm10.surjected.stats.txt"))
+    flf <- file.path(p, paste0("md.renamed.sorted.", s, ".real.mm10.surjected.flagstats"))
+    cmf <- file.path(p, paste0("md.renamed.sorted.", s, ".real.mm10.surjected.custom-metrics.txt"))
+    if (file.exists(stf)) {
+        st <- safe(parse_samtools_stats(stf))
+        fl <- safe(parse_flagstats(flf))
+        cm <- safe(parse_custom_metrics(cmf))
+        if (!is.null(st)) rows[[length(rows) + 1]] <- row_samtools(s, "GRCm38 + Giraffe (surj)", st, fl, cm)
+    }
+
+    # 3b. GRCm38 + Giraffe (pre-surj)
+    vgf <- file.path(p, paste0(s, ".real.mm10.stats.txt"))
+    if (file.exists(vgf)) {
+        vg <- safe(parse_vg_stats(vgf))
+        if (!is.null(vg)) rows[[length(rows) + 1]] <- row_vg(s, "GRCm38 + Giraffe (pre-surj)", vg)
+    }
+
+    # 4. mT2T + Giraffe (surj); custom-metrics files carry a "corrected-" prefix
+    p <- file.path(METRICS_DIR, "mT2T_Giraffe")
+    stf <- file.path(p, paste0("corrected-md.renamed.sorted.", s, ".real.Yu-T2T.surjected.stats.txt"))
+    flf <- file.path(p, paste0("md.renamed.sorted.", s, ".real.Yu-T2T.surjected.flagstats"))
+    cmf <- file.path(p, paste0("corrected-md.renamed.sorted.", s, ".real.Yu-T2T.surjected.custom-metrics.txt"))
+    if (file.exists(stf)) {
+        st <- safe(parse_samtools_stats(stf))
+        fl <- safe(parse_flagstats(flf))
+        cm <- safe(parse_custom_metrics(cmf))
+        if (!is.null(st)) rows[[length(rows) + 1]] <- row_samtools(s, "mT2T + Giraffe (surj)", st, fl, cm)
+    }
+
+    # 4b. mT2T + Giraffe (pre-surj)
+    vgf <- file.path(p, paste0(s, ".real.Yu-T2T.stats.txt"))
+    if (file.exists(vgf)) {
+        vg <- safe(parse_vg_stats(vgf))
+        if (!is.null(vg)) rows[[length(rows) + 1]] <- row_vg(s, "mT2T + Giraffe (pre-surj)", vg)
+    }
+
+    # 5. Founders (surj)
+    p <- file.path(METRICS_DIR, "Founders")
+    stf <- file.path(p, paste0("md.renamed.sorted.Founders.", s, ".surjected.stats.txt"))
+    flf <- file.path(p, paste0("md.renamed.sorted.Founders.", s, ".surjected.flagstats"))
+    cmf <- file.path(p, paste0("md.renamed.sorted.Founders.", s, ".surjected.custom-metrics.txt"))
+    if (file.exists(stf)) {
+        st <- safe(parse_samtools_stats(stf))
+        fl <- safe(parse_flagstats(flf))
+        cm <- safe(parse_custom_metrics(cmf))
+        if (!is.null(st)) rows[[length(rows) + 1]] <- row_samtools(s, "Founders Pangenome (surj)", st, fl, cm)
+    }
+
+    # 5b. Founders (pre-surj)
+    vgf <- file.path(p, paste0("Founders.", s, ".stats.txt"))
+    if (file.exists(vgf)) {
+        vg <- safe(parse_vg_stats(vgf))
+        if (!is.null(vg)) rows[[length(rows) + 1]] <- row_vg(s, "Founders Pangenome (pre-surj)", vg)
+    }
+}
+
+metrics_dt <- rbindlist(rows, use.names = TRUE, fill = TRUE)
+metrics_dt[, condition := factor(condition, levels = condition_order, ordered = TRUE)]
+
+# Sample counts per condition
+metrics_dt[, .N, by = condition][order(condition)]
+```
+
+```{r vg_summary}
+metrics_dt[condition %in% vg_conds, 
+           .(mean = mean(aln_score_mean, na.rm = TRUE),
+             sd = sd(aln_score_mean, na.rm = TRUE)),
+           by = condition]
+```
+
+# Long format for faceted plotting
+
+```{r long}
+metric_cols <- c("mapping_rate", "properly_paired_rate", "perfect_rate",
+                 "gapless_rate", "mapq60_rate", "error_rate",
+                 "mq0_rate", "insert_size_avg", "singletons_rate")
+
+metric_labels <- c(
+    mapping_rate         = "Mapping rate (%)",
+    properly_paired_rate = "Properly paired (%)",
+    perfect_rate         = "Perfect reads (%)",
+    gapless_rate         = "Gapless reads (%)",
+    mapq60_rate          = "MAPQ = 60 reads (%)",
+    error_rate           = "Error rate",
+    mq0_rate             = "MQ0 reads (%)",
+    insert_size_avg      = "Insert size (bp)",
+    singletons_rate      = "Singletons (%)"
+)
+
+# Output combined per-sample metrics dataframe
+fwrite(metrics_dt, "alignment_metrics_combined.tsv", sep = "\t")
+
+metrics_long <- melt(
+    metrics_dt,
+    id.vars = c("sample", "condition", "total_reads"),
+    measure.vars = metric_cols,
+    variable.name = "metric",
+    value.name = "value",
+    na.rm = TRUE
+)
+metrics_long[, metric := factor(metric, levels = metric_cols)]
+```
+
+# Plotting function
+
+```{r plot_fun}
+plot_metric_box <- function(dt, metric_name, ylab, conds = NULL) {
+    if (is.null(conds)) {
+        conds <- intersect(condition_order, unique(as.character(dt$condition)))
+    }
+    sub <- dt[condition %in% conds & metric == metric_name]
+    sub[, condition := factor(condition, levels = conds, ordered = TRUE)]
+
+    medians <- sub[, .(median_value = median(value, na.rm = TRUE)), by = condition]
+
+    ggplot(sub, aes(x = condition, y = value, fill = condition)) +
+        geom_boxplot(
+            outlier.shape = NA,
+            width = 0.6,
+            alpha = 0.4
+        ) +
+        geom_quasirandom(
+            aes(color = condition),
+            width = 0.18,
+            alpha = 0.85,
+            size = 1,
+            stroke = 0
+        ) +
+        geom_point(
+            data = medians,
+            aes(x = condition, y = median_value),
+            inherit.aes = FALSE,
+            shape = 95,
+            size = 8,
+            color = "black"
+        ) +
+        scale_fill_manual(values = condition_palette, drop = FALSE) +
+        scale_color_manual(values = condition_palette, drop = FALSE) +
+        scale_x_discrete(labels = condition_short) +
+        labs(x = NULL, y = ylab) +
+        theme_cowplot() +
+        JFMVTheme +
+        theme(
+            legend.position = "none",
+            axis.text.x = element_text(size = 7, lineheight = 0.85)
+        )
+}
+```
+
+# Individual metric panels
+
+## Mapping rate
+
+```{r panel_mapping_rate, fig.width = 4, fig.height = 4}
+p_mapping_rate <- plot_metric_box(metrics_long, "mapping_rate", "Mapping rate (%)")
+p_mapping_rate
+ggsave(file.path(FIG_DIR, "box_mapping_rate.svg"),
+       p_mapping_rate, width = 4, height = 1.5, units = "in")
+```
+
+## Properly paired rate
+
+```{r panel_properly_paired_rate, fig.width = 4, fig.height = 4}
+p_properly_paired_rate <- plot_metric_box(metrics_long, "properly_paired_rate", "Properly paired (%)")
+p_properly_paired_rate
+ggsave(file.path(FIG_DIR, "box_properly_paired_rate.svg"),
+       p_properly_paired_rate, width = 4, height = 1.5, units = "in")
+```
+
+## Perfect reads
+
+```{r panel_perfect_rate, fig.width = 4, fig.height = 4}
+p_perfect_rate <- plot_metric_box(metrics_long, "perfect_rate", "Perfect reads (%)")
+p_perfect_rate
+ggsave(file.path(FIG_DIR, "box_perfect_rate.svg"),
+       p_perfect_rate, width = 4, height = 1.5, units = "in")
+```
+
+## Gapless reads
+
+```{r panel_gapless_rate, fig.width = 4, fig.height = 4}
+p_gapless_rate <- plot_metric_box(metrics_long, "gapless_rate", "Gapless reads (%)")
+p_gapless_rate
+ggsave(file.path(FIG_DIR, "box_gapless_rate.svg"),
+       p_gapless_rate, width = 4, height = 1.5, units = "in")
+```
+
+## MAPQ = 60 rate
+
+```{r panel_mapq60_rate, fig.width = 4, fig.height = 4}
+p_mapq60_rate <- plot_metric_box(metrics_long, "mapq60_rate", "MAPQ = 60 reads (%)")
+p_mapq60_rate
+ggsave(file.path(FIG_DIR, "box_mapq60_rate.svg"),
+       p_mapq60_rate, width = 4, height = 1.5, units = "in")
+```
+
+## Error rate
+
+```{r panel_error_rate, fig.width = 4, fig.height = 4}
+p_error_rate <- plot_metric_box(metrics_long, "error_rate", "Error rate")
+p_error_rate
+ggsave(file.path(FIG_DIR, "box_error_rate.svg"),
+       p_error_rate, width = 4, height = 1.5, units = "in")
+```
+
+## MQ0 rate
+
+```{r panel_mq0_rate, fig.width = 4, fig.height = 4}
+p_mq0_rate <- plot_metric_box(metrics_long, "mq0_rate", "MQ0 reads (%)")
+p_mq0_rate
+ggsave(file.path(FIG_DIR, "box_mq0_rate.svg"),
+       p_mq0_rate, width = 4, height = 1.5, units = "in")
+```
+
+## Insert size
+
+```{r panel_insert_size, fig.width = 4, fig.height = 4}
+p_insert_size <- plot_metric_box(metrics_long, "insert_size_avg", "Insert size (bp)")
+p_insert_size
+ggsave(file.path(FIG_DIR, "box_insert_size_avg.svg"),
+       p_insert_size, width = 4, height = 1.5, units = "in")
+```
+
+## Singletons rate
+
+```{r panel_singletons_rate, fig.width = 4, fig.height = 4}
+p_singletons_rate <- plot_metric_box(metrics_long, "singletons_rate", "Singletons (%)")
+p_singletons_rate
+ggsave(file.path(FIG_DIR, "box_singletons_rate.svg"),
+       p_singletons_rate, width = 4, height = 1.5, units = "in")
+```
+
+# VG-specific panels (pre-surjection only)
+
+```{r vg_long}
+vg_long <- melt(
+    metrics_dt[condition %in% vg_conds],
+    id.vars = c("sample", "condition"),
+    measure.vars = c("aln_score_mean", "mapq_mean"),
+    variable.name = "metric",
+    value.name = "value",
+    na.rm = TRUE
+)
+```
+
+## Mean alignment score
+
+```{r panel_aln_score_mean, fig.width = 4, fig.height = 4}
+p_aln_score_mean <- plot_metric_box(vg_long, "aln_score_mean", "Mean alignment score", conds = vg_conds)
+p_aln_score_mean
+ggsave(file.path(FIG_DIR, "vg_aln_score_mean.svg"),
+       p_aln_score_mean, width = 4, height = 1.5, units = "in")
+```
+
+## Mean mapping quality
+
+```{r panel_mapq_mean, fig.width = 4, fig.height = 4}
+p_mapq_mean <- plot_metric_box(vg_long, "mapq_mean", "Mean mapping quality", conds = vg_conds)
+p_mapq_mean
+ggsave(file.path(FIG_DIR, "vg_mapq_mean.svg"),
+       p_mapq_mean, width = 4, height = 1.5, units = "in")
+```
+
+# Variant events (pre-surjection bp per read)
+
+```{r vg_events, fig.width = 4, fig.height = 4}
+events <- metrics_dt[
+    condition %in% vg_conds,
+    .(sample, condition,
+      Substitutions = substitutions_bp / total_reads,
+      Insertions    = insertions_bp / total_reads,
+      Deletions     = deletions_bp / total_reads,
+      Softclips     = softclips_bp / total_reads)
+]
+events_long <- melt(
+    events,
+    id.vars = c("sample", "condition"),
+    variable.name = "event",
+    value.name = "bp_per_read"
+)
+events_long[, event := factor(event, levels = c("Substitutions", "Insertions", "Deletions", "Softclips"))]
+
+vg_events_plot <- ggplot(
+    events_long,
+    aes(x = event, y = bp_per_read, fill = condition)
+) +
+    geom_boxplot(
+        outlier.shape = NA,
+        position = position_dodge(0.8),
+        width = 0.6,
+        alpha = 0.5
+    ) +
+    geom_quasirandom(
+        aes(color = condition),
+        dodge.width = 0.8,
+        width = 0.12,
+        size = 0.6,
+        alpha = 0.85,
+        stroke = 0
+    ) +
+    scale_fill_manual(values = condition_palette) +
+    scale_color_manual(values = condition_palette) +
+    labs(x = NULL, y = "bp per read", fill = NULL, color = NULL) +
+    theme_cowplot() +
+    JFMVTheme +
+    theme(legend.position = "bottom", legend.text = element_text(size = 7))
+
+vg_events_plot
+ggsave("figures/vg_variant_events.svg", vg_events_plot, width = 4, height = 1.5, units = "in")
+```
+
+# Pre vs post surjection scatter
+
+```{r pp_scatter, fig.width = 4, fig.height = 4}
+pp_pairs <- list(
+    c("GRCm38 + Giraffe",        "GRCm38 + Giraffe (pre-surj)",     "GRCm38 + Giraffe (surj)"),
+    c("mT2T + Giraffe",          "mT2T + Giraffe (pre-surj)",       "mT2T + Giraffe (surj)"),
+    c("Founders Pangenome",      "Founders Pangenome (pre-surj)",   "Founders Pangenome (surj)")
+)
+
+pp_rows <- rbindlist(lapply(pp_pairs, function(trio) {
+    label <- trio[1]; pre_c <- trio[2]; post_c <- trio[3]
+    pre  <- metrics_dt[condition == pre_c, .(sample, pre_mapping  = mapping_rate,
+                                             pre_perfect  = perfect_rate,
+                                             pre_gapless  = gapless_rate,
+                                             pre_paired   = properly_paired_rate)]
+    post <- metrics_dt[condition == post_c, .(sample, post_mapping = mapping_rate,
+                                               post_perfect = perfect_rate,
+                                               post_gapless = gapless_rate,
+                                               post_paired  = properly_paired_rate)]
+    merged <- merge(pre, post, by = "sample")
+    merged[, condition_group := label]
+    merged
+}))
+
+scatter_metric <- function(pre_col, post_col, xlab, ylab) {
+    ggplot(pp_rows, aes_string(x = pre_col, y = post_col, color = "condition_group")) +
+        geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#999") +
+        geom_point(alpha = 0.75, size = 1.5) +
+        facet_wrap(~ condition_group, nrow = 1, scales = "free") +
+        scale_color_manual(values = c(
+            "GRCm38 + Giraffe"     = "#2e5966",
+            "mT2T + Giraffe"       = "#c44e52",
+            "Founders Pangenome"   = "#6a5acd"
+        )) +
+        labs(x = xlab, y = ylab) +
+        theme_cowplot() +
+        JFMVTheme +
+        theme(legend.position = "none", strip.text = element_text(size = 8))
+}
+
+```
+
+## Mapping rate pre vs post
+
+```{r pp_scatter_mapping, fig.width = 12, fig.height = 4}
+p_pp_mapping <- scatter_metric("pre_mapping", "post_mapping",
+                               "Pre-surjection aligned (%)", "Post-surjection mapped (%)")
+p_pp_mapping
+ggsave(file.path(FIG_DIR, "pp_scatter_mapping.svg"),
+       p_pp_mapping, width = 12, height = 4, units = "in")
+```
+
+## Perfect reads pre vs post
+
+```{r pp_scatter_perfect, fig.width = 12, fig.height = 4}
+p_pp_perfect <- scatter_metric("pre_perfect", "post_perfect",
+                               "Pre-surjection perfect (%)", "Post-surjection perfect (%)")
+p_pp_perfect
+ggsave(file.path(FIG_DIR, "pp_scatter_perfect.svg"),
+       p_pp_perfect, width = 12, height = 4, units = "in")
+```
+
+## Gapless reads pre vs post
+
+```{r pp_scatter_gapless, fig.width = 12, fig.height = 4}
+p_pp_gapless <- scatter_metric("pre_gapless", "post_gapless",
+                               "Pre-surjection gapless (%)", "Post-surjection gapless (%)")
+p_pp_gapless
+ggsave(file.path(FIG_DIR, "pp_scatter_gapless.svg"),
+       p_pp_gapless, width = 12, height = 4, units = "in")
+```
+
+## Properly paired pre vs post
+
+```{r pp_scatter_paired, fig.width = 12, fig.height = 4}
+p_pp_paired <- scatter_metric("pre_paired", "post_paired",
+                              "Pre-surjection paired (%)", "Post-surjection paired (%)")
+p_pp_paired
+ggsave(file.path(FIG_DIR, "pp_scatter_paired.svg"),
+       p_pp_paired, width = 12, height = 4, units = "in")
+```
+
+# Per-sample heatmaps
+
+```{r heatmap_fun}
+heatmap_metric <- function(metric_name, label, reverse = FALSE) {
+    sub <- metrics_long[metric == metric_name]
+    if (nrow(sub) == 0) return(invisible(NULL))
+
+    pal <- if (reverse) rev(RColorBrewer::brewer.pal(11, "RdYlGn"))
+           else         RColorBrewer::brewer.pal(11, "RdYlGn")
+
+    ggplot(sub, aes(x = condition, y = sample, fill = value)) +
+        geom_tile(color = "white", linewidth = 0.2) +
+        scale_fill_gradientn(colours = pal, name = label) +
+        scale_x_discrete(labels = condition_short) +
+        labs(x = NULL, y = NULL, title = label) +
+        theme_cowplot() +
+        JFMVTheme +
+        theme(
+            axis.text.x = element_text(size = 7, lineheight = 0.85),
+            axis.text.y = element_text(size = 6),
+            legend.position = "right"
+        )
+}
+```
+
+## Mapping rate heatmap
+
+```{r heatmap_mapping_rate, fig.width = 6, fig.height = 4}
+hm_mapping_rate <- heatmap_metric("mapping_rate", "Mapping rate (%)")
+hm_mapping_rate
+ggsave(file.path(FIG_DIR, "heatmap_mapping_rate.svg"),
+       hm_mapping_rate, width = 6, height = 4, units = "in")
+```
+
+## Properly paired heatmap
+
+```{r heatmap_properly_paired, fig.width = 6, fig.height = 4}
+hm_properly_paired <- heatmap_metric("properly_paired_rate", "Properly paired (%)")
+hm_properly_paired
+ggsave(file.path(FIG_DIR, "heatmap_properly_paired.svg"),
+       hm_properly_paired, width = 6, height = 4, units = "in")
+```
+
+## Perfect reads heatmap
+
+```{r heatmap_perfect, fig.width = 6, fig.height = 4}
+hm_perfect <- heatmap_metric("perfect_rate", "Perfect reads (%)")
+hm_perfect
+ggsave(file.path(FIG_DIR, "heatmap_perfect.svg"),
+       hm_perfect, width = 6, height = 4, units = "in")
+```
+
+## Gapless reads heatmap
+
+```{r heatmap_gapless, fig.width = 6, fig.height = 4}
+hm_gapless <- heatmap_metric("gapless_rate", "Gapless reads (%)")
+hm_gapless
+ggsave(file.path(FIG_DIR, "heatmap_gapless.svg"),
+       hm_gapless, width = 6, height = 4, units = "in")
+```
+
+## MAPQ = 60 heatmap
+
+```{r heatmap_mapq60, fig.width = 6, fig.height = 4}
+hm_mapq60 <- heatmap_metric("mapq60_rate", "MAPQ = 60 (%)")
+hm_mapq60
+ggsave(file.path(FIG_DIR, "heatmap_mapq60.svg"),
+       hm_mapq60, width = 6, height = 4, units = "in")
+```
+
+## Error rate heatmap
+
+```{r heatmap_error, fig.width = 6, fig.height = 4}
+hm_error <- heatmap_metric("error_rate", "Error rate", reverse = TRUE)
+hm_error
+ggsave(file.path(FIG_DIR, "heatmap_error.svg"),
+       hm_error, width = 6, height = 4, units = "in")
+```
+
+# Summary table
+
+```{r summary}
+summary_dt <- metrics_long[,
+    .(N = .N,
+      mean = round(mean(value, na.rm = TRUE), 3),
+      sd   = round(sd(value,   na.rm = TRUE), 3),
+      median = round(median(value, na.rm = TRUE), 3)),
+    by = .(condition, metric)
+][order(metric, condition)]
+
+summary_dt
+fwrite(summary_dt, "alignment_metrics_summary.tsv", sep = "\t")
+```
+
+# Session info
+
+```{r session}
+sessionInfo()
+```

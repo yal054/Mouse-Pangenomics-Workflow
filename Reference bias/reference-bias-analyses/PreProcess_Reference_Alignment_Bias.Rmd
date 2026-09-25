@@ -1,0 +1,144 @@
+---
+title: "Process reference alignment bias to ECDF functions (simulated reads)"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Reference_Bias/"))
+set.seed(0)
+
+source(file.path(REPO_ROOT, "shared-R", "CS_Aesthetic.R"))
+
+require("ggplot2")
+require("cowplot")
+require("viridis")
+require("reshape2")
+require("dplyr")
+require("tidyverse")
+library(plotly)
+library(Rtsne)
+library(stringr)
+
+theme_set(theme_cowplot())
+```
+
+```{r define import function}
+import_parsed_vcfs <- function(path) {
+  # collect .parsed or .parsed.bed files
+  if (dir.exists(path)) {
+    files <- list.files(path, pattern = "\\.parsed(?:\\.bed)?$", full.names = TRUE)
+  } else {
+    files <- path
+  }
+  if (length(files) == 0) stop("No parsed BED files found.")
+  
+  df_list <- list()
+  for (f in files) {
+    df <- read.table(f, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+    fname <- basename(f)
+    
+    # strip trailing .parsed or .parsed.bed
+    core <- sub("\\.parsed(?:\\.bed)?$", "", fname)
+    
+    parts <- strsplit(core, "\\.", perl=TRUE)[[1]]
+    if (length(parts) < 2) {
+      warning(sprintf("Skipping '%s': doesn't look like assembly.animal.parsed", fname))
+      next
+    }
+    
+    # last part = animal; everything else = assembly
+    animal   <- parts[length(parts)]
+    assembly <- paste(parts[-length(parts)], collapse = ".")
+    
+    df$assembly <- assembly
+    df$animal   <- animal
+    df_list[[f]] <- df
+  }
+  
+  combined_df <- do.call(rbind, df_list)
+  combined_df
+}
+```
+
+```{r define epdf generation function}
+# Define a function factory that returns an empirical PDF function.
+create_epdf <- function(data, bw = "nrd0", from = NULL, to = NULL, n = 512) {
+  # Build a list of arguments for density()
+  args <- list(x = data, bw = bw, n = n)
+  if (!is.null(from)) {
+    args$from <- from
+  }
+  if (!is.null(to)) {
+    args$to <- to
+  }
+  
+  # Compute the kernel density estimate using the conditional arguments
+  dens <- do.call(density, args)
+  
+  # Create an interpolation function based on the density estimates.
+  # rule = 2 makes the function use the boundary values for extrapolation.
+  epdf_function <- approxfun(dens$x, dens$y, rule = 2)
+  
+  # Return the function (closure) so you can later pass values to it.
+  return(epdf_function)
+}
+```
+
+```{r import all and save epdf functions}
+# Loop through the parsed VCFs, import each, generate an epdf, then save the epdf to a file.
+
+for (file in dir("Parsed_VCFs/")) {
+  # Define file path  
+  path<- paste0("Parsed_VCFs/", file)
+  
+  print(paste0("Processing file: ", path))
+  # Import the parsed VCF
+  import_parsed_vcfs(path)->pileupData
+  
+  # filter out rows with NA in allele_fraction
+  pileupData <- pileupData %>% filter(!is.na(allele_fraction))
+  
+  # Generate the epdf
+  epdf_pileup <- create_epdf(pileupData$allele_fraction)
+  
+  # Save the epdf to a file
+  outputfile<-paste0("epdf_", file, ".rds")
+  saveRDS(epdf_pileup, file = outputfile)
+  
+}
+```
+
+```{r import all and save ecdf functions}
+# Loop through the parsed VCFs, import each, generate an ecdf, then save the ecdf to a file.
+
+for (file in dir("Parsed_VCFs/")) {
+  # Define file path  
+  path<- paste0("Parsed_VCFs/", file)
+  
+  print(paste0("Processing file: ", path))
+  # Import the parsed VCF
+  import_parsed_vcfs(path)->pileupData
+  
+  # filter out rows with NA in allele_fraction
+  pileupData <- pileupData %>% filter(!is.na(allele_fraction))
+  
+  # Generate the ecdf
+  ecdf_pileup <- ecdf(pileupData$allele_fraction)
+  
+  # Save the ecdf to a file
+  outputfile<-paste0("ecdf_", file, ".rds")
+  saveRDS(ecdf_pileup, file = outputfile)
+}
+```

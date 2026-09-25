@@ -1,0 +1,202 @@
+---
+title: "Visualize Panacus results"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+set.seed(0)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Graph_descriptive_statistics/"))
+
+library(ggplot2)
+library(cowplot)
+library(scales)
+library("dplyr")
+library(factoextra)
+library(tidyr)
+source(file.path(REPO_ROOT, "shared-R", "CS_Aesthetic.R"))
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+library(ggrepel)
+library(gridExtra)
+library(reshape2)
+library(ggbeeswarm)
+
+library(ComplexUpset)
+library(dplyr)
+library(patchwork)
+library(data.table)
+```
+
+```{r import_data}
+# Import data
+fread("tables/cov_hist.tsv")-> cov_hist
+# remove all nodes with node of 0
+cov_hist <- cov_hist[cov_hist$node != 0, ]
+```
+
+```{r plot_cov_hist bp, fig.width=4, fig.height=2}
+ggplot(cov_hist, aes(x = count, y = bp/1e9)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  scale_x_continuous(breaks = pretty_breaks()) +
+  scale_y_continuous(breaks = pretty_breaks()) +
+  labs(x = "Number of paths", y = "Base pairs (Gb)") +
+  theme_minimal() +
+  theme(text = element_text(size = 12))
+```
+
+```{r plot_cov_hist edge, fig.width=4, fig.height=2}
+ggplot(cov_hist, aes(x = count, y = edge/1e6)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  scale_x_continuous(breaks = pretty_breaks()) +
+  scale_y_continuous(breaks = pretty_breaks()) +
+  labs(x = "Number of paths", y = "Number of edges\n(millions)") +
+  theme_minimal() +
+  theme(text = element_text(size = 12))
+```
+
+```{r plot_cov_hist node, fig.width=4, fig.height=2}
+ggplot(cov_hist, aes(x = count, y = node/1e6)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  scale_x_continuous(breaks = pretty_breaks()) +
+  scale_y_continuous(breaks = pretty_breaks()) +
+  labs(x = "Number of paths", y = "Number of nodes\n(millions)") +
+  theme_minimal() +
+  theme(text = element_text(size = 12))
+```
+
+```{r rm hist}
+rm(cov_hist)
+```
+
+```{r import node_dist}
+# Import data
+fread("tables/node_dist.tsv")-> node_dist
+```
+
+```{r plot_node_dist_points, fig.width=4, fig.height=2}
+library(data.table)
+library(ggplot2)
+library(scales)
+
+nd <- copy(node_dist)
+
+nd[, Coverage_r := round(Coverage, 6)]
+nd[, Log_Length_r := round(`Log-Length`, 6)]
+
+ggplot(nd, aes(x = Coverage_r, y = Log_Length_r, fill = `Log-Size` / 1e6)) +
+  geom_point(shape = 23, size = 4, stroke = 0) +
+  scale_x_continuous(breaks = pretty_breaks()) +
+  scale_y_continuous(breaks = pretty_breaks()) +
+  labs(
+    x = "Coverage",
+    y = "Log-Length",
+    fill = "Nodes (millions)"
+  ) +
+  theme_minimal() +
+  theme(text = element_text(size = 12))
+```
+
+```{r rm node_dist}
+rm(node_dist)
+```
+
+```{r import growth}
+# Import data
+fread("tables/pan_growth.tsv")-> growth
+```
+
+```{r parse_growth}
+growth_raw <- copy(growth)
+
+metric_names <- names(growth_raw)
+count_vals   <- as.numeric(growth_raw$count[4:nrow(growth_raw)])
+
+growth_list <- vector("list", length(metric_names) - 1)
+
+for (j in 2:length(metric_names)) {
+  growth_list[[j - 1]] <- data.table(
+    metric   = metric_names[j],
+    coverage = as.numeric(growth_raw[[j]][1]),
+    quorum   = as.numeric(growth_raw[[j]][2]),
+    count    = count_vals,
+    value    = as.numeric(growth_raw[[j]][4:nrow(growth_raw)])
+  )
+}
+
+growth_long <- rbindlist(growth_list)
+
+growth_long <- growth_long[
+  !is.na(metric) &
+  !is.na(coverage) &
+  !is.na(quorum) &
+  !is.na(count) &
+  !is.na(value)
+]
+```
+
+
+```{r plot_growth_node, fig.width=4, fig.height=2}
+growth_node <- growth_long[metric == "node"]
+
+ggplot(growth_node, aes(x = count, y = value / 1e6, color = factor(coverage))) +
+  geom_line(linewidth = 0.8) +
+  coord_cartesian(xlim = c(1, 87)) +
+  scale_x_continuous(breaks = pretty_breaks()) +
+  scale_y_continuous(breaks = pretty_breaks()) +
+  labs(
+    x = "Number of assemblies",
+    y = "Cumulative nodes\n(millions)",
+    color = "Coverage"
+  ) +
+  theme_minimal() +
+  theme(text = element_text(size = 12)) +
+  scale_color_viridis_d(begin = 0.2, end = 0.9)
+```
+
+```{r plot_growth_edge, fig.width=4, fig.height=2}
+growth_edge <- growth_long[metric == "edge"]
+
+ggplot(growth_edge, aes(x = count, y = value / 1e6, color = factor(coverage))) +
+  geom_line(linewidth = 0.8) +
+  coord_cartesian(xlim = c(1, 87)) +
+  scale_x_continuous(breaks = pretty_breaks()) +
+  scale_y_continuous(breaks = pretty_breaks()) +
+  labs(
+    x = "Number of assemblies",
+    y = "Cumulative edges\n(millions)",
+    color = "Coverage"
+  ) +
+  theme_minimal() +
+  theme(text = element_text(size = 12)) +
+  scale_color_viridis_d(begin = 0.2, end = 0.9)
+```
+
+```{r plot_growth_bp, fig.width=4, fig.height=2}
+growth_bp <- growth_long[metric == "bp"]
+
+ggplot(growth_bp, aes(x = count, y = value / 1e9, color = factor(coverage))) +
+  geom_line(linewidth = 0.8) +
+  coord_cartesian(xlim = c(1, 87)) +
+  scale_x_continuous(breaks = pretty_breaks()) +
+  scale_y_continuous(breaks = pretty_breaks()) +
+  labs(
+    x = "Number of assemblies",
+    y = "Cumulative\nsequence (Gb)",
+    color = "Coverage"
+  ) +
+  theme_minimal() +
+  theme(text = element_text(size = 12)) +
+  scale_color_viridis_d(begin = 0.2, end = 0.9)
+```

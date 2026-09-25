@@ -1,0 +1,538 @@
+---
+title: "Visualize assembly stats"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+PANGENOME_DATA <- "" # pangenome data directory (BUSCO summaries etc.)
+COLOR_KEY <- "" # strain colour key (ColorScheme.tsv)
+```
+
+```{r setup, include=FALSE}
+set.seed(0)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Assembly_metric_analysis"))
+
+library(ggplot2)
+library(cowplot)
+library(scales)
+library("dplyr")
+library(factoextra)
+library(tidyr)
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+library(ggrepel)
+library(ggbeeswarm)
+
+```
+
+```{r load data length and gap stats}
+# Load data
+data <- read.table("040326_stats_with_everything.txt", header = TRUE, sep = "\t")
+
+# Import color key
+color_key<-read.delim(COLOR_KEY, header = TRUE)
+```
+
+```{r add plotting group}
+data$Group2<-data$Strain
+# Set all 75_CC to "RI"
+data$Group2[data$Group == "75_CC"] <- "RI"
+
+# Set all "CC" containing RI_vJax to "RI"
+data$Group2[grepl("CC", data$Group2) & grepl("RI_vJax", data$Group)] <- "RI"
+
+# Replace "_" with / in Group2
+data$Group2<-gsub("_", "/", data$Group2)
+
+# Filter out GCA_000181195.1 assembly as it does not have a Strain
+data<-data[!grepl("GCA_000181195.1", data$Assembly),]
+
+# Add colors to color_key for any Strains missing in the color_key
+rbind(
+  color_key,
+  data.frame(
+  Strain="Other",
+  Letter=NA,
+  hex="#b7893a",
+  RGB=NA
+  )
+)->color_key
+
+# Replace "ref" in Group with "Founder"
+data$Group[data$Group == "ref"] <- "Founder"
+
+# Replace "Founder_v1" in Group with "Founder"
+data$Group[data$Group == "Founder_v1"] <- "Founder"
+# Replace "75_CC" in Group with "RI"
+data$Group[data$Group == "75_CC"] <- "RI"
+# Replace "none" with "Other"
+data$Group[data$Group == "none"] <- "Other"
+
+# for Group=="Other" set Group2 to "Other"
+data$Group2[data$Group == "Other"] <- "Other"
+
+# for Group=="extra" set Group2 to "Founder"
+data$Group2[data$Group == "extra"] <- "Founder"
+
+# for Group=="Founder_vJax" set Group2 to it's strain
+data$Group2[data$Group == "Founder_vJax"] <- data$Strain[data$Group == "Founder_vJax"]
+
+# Correct Group2 "NZO/HILtJ" to "NZO/HlLtJ"
+data$Group2[data$Group2 == "NZO/HILtJ"] <- "NZO/HlLtJ"
+
+# Order data$Group2 to make color_key$Strain
+data$Group2<-factor(data$Group2, levels = color_key$Strain, ordered = TRUE)
+
+color_values <- setNames(color_key$hex, color_key$Strain)
+
+# replace colors with "red" except for the "RI" and "Other" entries in color_values
+color_values[!grepl("RI|Other", names(color_values))] <- "#94509f"
+
+# Add Founder group to color_values
+color_values["Founder"] <- "#94509f"
+
+data$Group<-factor(data$Group, levels = c("Founder_vJax", "RI_vJax", "none_vJax", "extra","Other","RI","Founder"), ordered = TRUE)
+
+# calculate mean gap length
+data$mean_gap_length <- ifelse(data$total.gap.bp > 0 & data$total.gaps > 0, data$total.gap.bp / data$total.gaps, 0)
+```
+
+```{r plot Total length for all, include=TRUE, fig.width=11/3, fig.height=8/3}
+ggplot(data, aes(x = Total.length/1000000, y = Group)) +
+  geom_violin(aes(fill=Group, color=Group)) +
+  geom_quasirandom(
+    width = 0.3, 
+    color = "black", 
+    stroke = 0, 
+    size = 0.75, 
+    orientation = 'y'
+  ) +
+  scale_color_manual(values = color_values) +
+  scale_fill_manual(values = color_values) +
+  scale_x_continuous(limits = c(2300, 3000)) +
+  JFMVTheme +
+  theme(
+    axis.text.x       = element_text(size = 10),
+    axis.title.x      = element_text(size = 13, face = "bold"),
+    axis.text.y       = element_text(angle = 45, hjust = 1, face = "bold", size=12),
+    legend.position   = "none") +
+  labs(title = NULL, x = "Total Length (Mb)", y = NULL)->p1_all
+
+p1_all
+```
+
+```{r plot Total length for main panel, include=TRUE, fig.width=11/3, fig.height=8/3}
+ggplot(subset(data, Group %in% c("Founder","Other","RI") ), aes(x = Total.length/1000000, y = Group)) +
+  geom_violin(aes(fill=Group, color=Group)) +
+  geom_quasirandom(
+    width = 0.3, 
+    color = "black", 
+    stroke = 0, 
+    size = 0.75, 
+    orientation = 'y'
+  ) +
+  scale_color_manual(values = color_values) +
+  scale_fill_manual(values = color_values) +
+  scale_x_continuous(limits = c(min(data$Total.length/1000000)*0.95, max(data$Total.length/1000000))*1.02 ) +
+  JFMVTheme +
+  theme(
+    axis.text.x       = element_text(size = 10),
+    axis.title.x      = element_text(size = 13, face = "bold"),
+    axis.text.y       = element_text(angle = 0, hjust = 1, face = "bold", size=12),
+    legend.position   = "none") +
+  labs(title = NULL, x = "Total Length (Mb)", y = NULL)->p1
+
+p1
+
+# save plot
+ggsave("Total_length.png", p1, width = 3.25, height = 2.3636, dpi = 300)
+# save as svg
+ggsave("Total_length.svg", p1, width = 3.25, height = 2.3636)
+```
+
+```{r plot gap.bp for main all, include=TRUE, fig.width=11/3, fig.height=8/3}
+ggplot(data, aes(x = total.gap.bp/1000000, y = Group)) +
+  geom_violin(aes(fill=Group, color=Group)) +
+  geom_quasirandom(
+    width = 0.3, 
+    color = "black", 
+    stroke = 0, 
+    size = 0.75, 
+    orientation = 'y'
+  ) +
+  scale_color_manual(values = color_values) +
+  scale_fill_manual(values = color_values) +
+  JFMVTheme +
+  theme(
+    axis.text.x       = element_text(size = 10),
+    axis.title.x      = element_text(size = 13, face = "bold"),
+    axis.text.y       = element_text(angle = 45, hjust = 1, face = "bold", size=12),
+    legend.position   = "none",
+    legend.direction  = "horizontal",   # ensure legend is laid out horizontally
+    legend.key.size   = unit(0.1, "in"),
+    legend.key.width  = unit(0.1, "in"),  # tighten key width
+    legend.spacing.x  = unit(0.01, "in"), # tighten spacing between legend items
+    legend.box.spacing = unit(0, "in"),   # remove extra spacing around the box
+    legend.margin     = margin(0, 0, 0, 0), # remove any margin around the legend
+    legend.text       = element_text(size = 10),
+    legend.title      = element_text(size = 10)
+  )+
+  labs(title = NULL, x = "Length of gaps  (Mb)", y = NULL)->p2_all
+
+p2_all
+```
+
+```{r plot gap.bp, include=TRUE, fig.width=11/3, fig.height=8/3}
+ggplot(subset(data, Group %in% c("Founder","Other","RI") ), aes(x = total.gap.bp/1000000, y = Group)) +
+  geom_violin(aes(fill=Group, color=Group)) +
+  geom_quasirandom(
+    width = 0.3, 
+    color = "black", 
+    stroke = 0, 
+    size = 0.75, 
+    orientation = 'y'
+  ) +
+  scale_color_manual(values = color_values) +
+  scale_fill_manual(values = color_values) +
+  JFMVTheme +
+  theme(
+    axis.text.x       = element_text(size = 10),
+    axis.title.x      = element_text(size = 13, face = "bold"),
+    axis.text.y       = element_text(angle = 0, hjust = 1, face = "bold", size=12),
+    legend.position   = "none",
+    legend.direction  = "horizontal",   # ensure legend is laid out horizontally
+    legend.key.size   = unit(0.1, "in"),
+    legend.key.width  = unit(0.1, "in"),  # tighten key width
+    legend.spacing.x  = unit(0.01, "in"), # tighten spacing between legend items
+    legend.box.spacing = unit(0, "in"),   # remove extra spacing around the box
+    legend.margin     = margin(0, 0, 0, 0), # remove any margin around the legend
+    legend.text       = element_text(size = 10),
+    legend.title      = element_text(size = 10)
+  )+
+  labs(title = NULL, x = "Length of gaps  (Mb)", y = NULL)->p2
+
+p2
+
+# save plot
+ggsave("Gap_length.png", p2, width = 3.25, height = 2.3636, dpi = 300)
+
+# save as svg
+ggsave("Gap_length.svg", p2, width = 3.25, height = 2.3636)
+```
+
+```{r plot mean_gap_length for main panel, include=TRUE, fig.width=11/3, fig.height=8/3}
+ggplot(subset(data, Group %in% c("Founder","Other","RI") ), aes(x = mean_gap_length/1e3, y = Group)) +
+  geom_violin(aes(fill=Group, color=Group)) +
+  geom_quasirandom(
+    width = 0.3, 
+    color = "black", 
+    stroke = 0, 
+    size = 0.75, 
+    orientation = 'y'
+  ) +
+  scale_color_manual(values = color_values) +
+  scale_fill_manual(values = color_values) +
+  scale_x_continuous(limits = c(0, max(data$mean_gap_length/1e3)*1.05) ) +
+  JFMVTheme +
+  theme(
+    axis.text.x       = element_text(size = 10),
+    axis.title.x      = element_text(size = 13, face = "bold"),
+    axis.text.y       = element_text(angle = 0, hjust = 1, face = "bold", size=12),
+    legend.position   = "none") +
+  labs(title = NULL, x = "Mean gap length (bp)", y = NULL)->p2b
+
+p2b
+```
+
+```{r plot mean_gap_length vs total.gaps, include=TRUE, fig.width=11/3, fig.height=3*8/3}
+ggplot(subset(data, Group %in% c("Founder","Other","RI") ), aes(x = mean_gap_length/1e3, y=total.gaps/1e3)) +
+  geom_point(aes(color=Group), size=1, stroke=0) +
+  scale_color_manual(values = color_values) +
+  scale_x_continuous(limits = c(0, max(data$mean_gap_length/1e3)*1.05) ) +
+  scale_y_continuous(limits = c(0, max(data$total.gaps/1e3)*1.05) ) +
+  JFMVTheme +
+  geom_vline(xintercept = mean(data$mean_gap_length[data$Group %in% c("Founder","Other","RI")])/1e3, linetype="dashed", color = "grey25") +
+  # add text value of mean of the mean_gap_length next to the line
+  annotate("text", x = mean(data$mean_gap_length[data$Group %in% c("Founder","Other","RI")])/1e3*1.1, y = max(data$total.gaps[data$Group %in% c("Founder","Other","RI")]/1e3)*0.95, label = paste0("Mean = ", round(mean(data$mean_gap_length[data$Group %in% c("Founder","Other","RI")])/1e3, 1), " Kb"), color = "grey25", size=3.5, hjust=0) +
+  theme(
+    axis.text.x       = element_text(size = 10),
+    axis.title.x      = element_text(size = 13, face = "bold"),
+    axis.text.y       = element_text(angle = 0, hjust = 1, face = "bold", size=12),
+    legend.position   = "none") +
+  labs(title = NULL, x = "Mean gap length (Kb)", y = "Total number of gaps (1x10^3)") +
+  facet_wrap(~Group, ncol=1)->p2c
+
+p2c
+```
+
+```{r plot total.gap.bp vs total.gaps, include=TRUE, fig.width=11/3, fig.height=8/3}
+ggplot(subset(data, Group %in% c("Founder","Other","RI") ), aes(x = total.gap.bp/1e6, y=total.gaps/1e3)) +
+  geom_point(aes(color=Group), size=1, stroke=0) +
+  scale_color_manual(values = color_values) +
+  scale_x_continuous(limits = c(0, max(data$total.gap.bp/1e6)*1.05) ) +
+  scale_y_continuous(limits = c(0, max(data$total.gaps/1e3)*1.05) ) +
+  JFMVTheme +
+  theme(
+    axis.text.x       = element_text(size = 10),
+    axis.title.x      = element_text(size = 13, face = "bold"),
+    axis.text.y       = element_text(angle = 0, hjust = 1, face = "bold", size=12),
+    legend.position   = "none") +
+  labs(title = NULL, x = "Total gap length (Mb)", y = "Total number of gaps (1x10^3)")->p2d
+
+p2d
+```
+
+```{r define BUSCO import function}
+# BUSCO_import
+# Read a BUSCO short_summary text file and return a single‑row data frame
+# containing run metadata, BUSCO percentages, BUSCO counts, and (if present)
+# basic assembly statistics. Missing fields become NA.
+#
+# path: character(1) – full path to the short_summary file.
+
+BUSCO_import <- function(path) {
+  x <- readLines(path, warn = FALSE)
+
+  # trim the “Dependencies and versions:” block
+  dep <- grep("^Dependencies and versions:", x, fixed = TRUE)
+  if (length(dep)) x <- x[seq_len(dep - 1)]
+
+  # helpers
+  grab   <- function(pat, txt = x) grep(pat, txt, value = TRUE, perl = TRUE)
+  num    <- function(v) if (length(v)) as.numeric(v) else NA_real_
+  intval <- function(v) if (length(v)) as.integer(v) else NA_integer_
+  size2bp <- function(s) {
+    if (!length(s)) return(NA_real_)
+    s <- trimws(s)
+    if (grepl(" MB$", s, ignore.case = TRUE))
+      return(as.numeric(sub(" MB$", "", s, ignore.case = TRUE)) * 1e6)
+    if (grepl(" KB$", s, ignore.case = TRUE))
+      return(as.numeric(sub(" KB$", "", s, ignore.case = TRUE)) * 1e3)
+    as.numeric(s)
+  }
+
+  # percentage line
+  tl <- gsub("\\s", "", grab("C:[0-9.]+%"))
+  C_pct <- num(sub(".*C:([0-9.]+)%.*",     "\\1", tl))
+  S_pct <- num(sub(".*\\[S:([0-9.]+)%,.*", "\\1", tl))
+  D_pct <- num(sub(".*D:([0-9.]+)%\\].*",  "\\1", tl))
+  F_pct <- num(sub(".*F:([0-9.]+)%,.*",    "\\1", tl))
+  M_pct <- num(sub(".*M:([0-9.]+)%,.*",    "\\1", tl))
+  E_pct <- num(sub(".*E:([0-9.]+)%.*",     "\\1", tl))
+  n_busco <- intval(sub(".*n:([0-9]+).*",  "\\1", tl))
+
+  # BUSCO counts
+  n_complete   <- intval(sub(".*?\\t([0-9]+)\\t.*", "\\1", grab("Complete BUSCOs \\(C\\)")))
+  n_single     <- intval(sub(".*?\\t([0-9]+)\\t.*", "\\1", grab("Complete and single-copy")))
+  n_duplicated <- intval(sub(".*?\\t([0-9]+)\\t.*", "\\1", grab("Complete and duplicated")))
+  n_fragmented <- intval(sub(".*?\\t([0-9]+)\\t.*", "\\1", grab("Fragmented BUSCOs")))
+  n_missing    <- intval(sub(".*?\\t([0-9]+)\\t.*", "\\1", grab("Missing BUSCOs")))
+  n_total      <- intval(sub(".*?\\t([0-9]+)\\t.*", "\\1", grab("Total BUSCO groups")))
+
+  # assembly stats (optional)
+  n_scaffolds <- intval(sub(".*?\\t([0-9]+)\\t.*", "\\1", grab("Number of scaffolds")))
+  n_contigs   <- intval(sub(".*?\\t([0-9]+)\\t.*", "\\1", grab("Number of contigs")))
+  total_len   <- num   (sub(".*?\\t([0-9]+)\\t.*", "\\1", grab("Total length")))
+  percent_gaps<- num   (sub(".*?\\t([0-9.]+)\\s*%?.*", "\\1", grab("Percent gaps")))
+  scaffold_N50_bp <- size2bp(sub(".*?\\t([0-9.]+\\s*[MK]B?).*", "\\1", grab("Scaffold N50")))
+  contig_N50_bp   <- size2bp(sub(".*?\\t([0-9.]+\\s*[MK]B?).*", "\\1", grab("Contig[s]? N50")))
+
+  # metadata
+  busco_version <- sub(".*version is: ([0-9.]+).*",     "\\1", grab("^# BUSCO version"))
+  lineage       <- sub(".*dataset is: ([^(]+).*",       "\\1", grab("^# The lineage dataset"))
+  mode          <- sub(".*mode: ([^ ]+).*",             "\\1", grab("^# BUSCO was run in mode"))
+  predictor     <- sub(".*Gene predictor used: (.+)$",  "\\1", grab("^# Gene predictor"))
+  asm_path      <- sub(".*for file (.+)$",              "\\1", grab("^# Summarized benchmarking"))
+  assembly_file <- basename(asm_path)
+
+  # result
+  data.frame(
+    summary_path = path,
+    assembly_file,
+    busco_version,
+    lineage,
+    mode,
+    predictor,
+    C_pct, S_pct, D_pct, F_pct, M_pct, E_pct,
+    n_busco,
+    n_complete, n_single, n_duplicated,
+    n_fragmented, n_missing, n_total,
+    n_scaffolds, n_contigs,
+    total_length_bp = total_len,
+    percent_gaps,
+    scaffold_N50_bp, contig_N50_bp,
+    stringsAsFactors = FALSE
+  )
+}
+
+```
+
+```{r import BUSCO data}
+# Define paths
+## Make like of v1 founder assemblies. All files in a provided directory ending with "_busco.txt"
+
+BUSCO_v1_files <- list.files(
+  path = file.path(PANGENOME_DATA, "BUSCO analysis (mouse assemblies)/"),
+  pattern = "_busco.txt$",
+  full.names = TRUE
+)
+
+## Make list of RI assemblies. All files in a provided directory ending with "_busco.txt"
+BUSCO_RI_files <- list.files(
+  path = file.path(PANGENOME_DATA, "BUSCO analysis (mouse assemblies)/75_CC/"),
+  pattern = "_busco.txt$",
+  full.names = TRUE
+)
+
+## Make list of Other assemblies. All files in a provided directory ending with "_busco.txt"
+BUSCO_Other_files <- list.files(
+  path = file.path(PANGENOME_DATA, "BUSCO analysis (mouse assemblies)/11_final_assemblies/"),
+  pattern = "_busco.txt$",
+  full.names = TRUE
+)
+
+## Make list of nonevJAX assemblies. All files in a provided directory ending with "_busco.txt"
+# BUSCO_nonevJAX_files <- list.files(
+#   path = file.path(PANGENOME_DATA, "BUSCO analysis (mouse assemblies)/extra potential max graph assemblies/"),
+#   pattern = "_busco.txt$",
+#   full.names = TRUE
+# )
+
+# combine all files into a single list
+BUSCO_files <- c(BUSCO_v1_files, BUSCO_RI_files, BUSCO_Other_files)
+
+# Import BUSCO data
+BUSCO_data <- lapply(BUSCO_files, BUSCO_import) %>% bind_rows()
+
+# remove first column
+BUSCO_data <- BUSCO_data[, -1]
+
+BUSCO_data$assembly_file
+```
+
+```{r prepare BUSCO data}
+
+dim(BUSCO_data)
+# remove entries that aren't used
+BUSCO_data<-BUSCO_data[!grepl("GCA_000181195.1", BUSCO_data$assembly_file),]
+dim(BUSCO_data)
+
+# remove:
+# GCA_029234035.1
+# GCA_029234525.1
+# GCA_029236065.1
+# GCA_029237185.1
+# GCA_029237205.1
+# GCA_029237225.1
+# GCA_031763685.1
+# GCA_000389885.1
+# GCA_003774525.2
+# GCA_000185105.2
+# GCA_000185125.1
+# GCA_030265425.1
+# GCA_031761455.1
+# GCA_048544855.1
+# GCA_000002165.1
+# GCA_043792745.1
+# GCA_043793115.1
+# GCA_043972725.1
+# GCA_949316315.1
+# GCA_964188545.1
+# GCA_921998325.2
+# GCA_921998335.2
+# GCA_921998345.2
+# GCA_921998355.2
+# GCA_921998555.2
+# GCA_921999005.2
+# GCA_947593165.1
+# GCA_921997125.2
+# GCA_921997145.2
+# GCA_921998315.2
+# GCA_921998635.2
+# GCA_921998905.2
+# GCA_921999095.2
+# GCA_921999865.2
+# GCA_922000895.2
+# GCA_947599735.1
+# GCA_000181195.1
+# renamed_CC001_genome.fa
+
+# remove any entries that contain any of the above patterns
+BUSCO_data<-BUSCO_data[!grepl("GCA_029234035.1|GCA_029234525.1|GCA_029236065.1|GCA_029237185.1|GCA_029237205.1|GCA_029237225.1|GCA_031763685.1|GCA_000389885.1|GCA_003774525.2|GCA_000185105.2|GCA_000185125.1|GCA_030265425.1|GCA_031761455.1|GCA_048544855.1|GCA_000002165.1|GCA_043792745.1|GCA_043793115.1|GCA_043972725.1|GCA_949316315.1|GCA_964188545.1|GCA_921998325.2|GCA_921998335.2|GCA_921998345.2|GCA_921998355.2|GCA_921998555.2|GCA_921999005.2|GCA_947593165.1|GCA_921997125.2|GCA_921997145.2|GCA_921998315.2|GCA_921998635.2|GCA_921998905.2|GCA_921999095.2|GCA_921999865.2|GCA_000181195.1|renamed_CC001_genome.fa", BUSCO_data$assembly_file),]
+
+dim(BUSCO_data)
+
+# Add group column
+BUSCO_data$Group<-NA
+# if assembly_file contains "_CC0" set Group to "RI"
+BUSCO_data$Group[grepl("_CC0", BUSCO_data$assembly_file)] <- "RI"
+
+# if assembly_file contains "_v1_" set Group to "Founder"
+BUSCO_data$Group[grepl("129S1|CAST|NZO|WSB|A_J|NOD|PWK", BUSCO_data$assembly_file)] <- "Founder"
+
+# else set Group to "Other"
+BUSCO_data$Group[is.na(BUSCO_data$Group)] <- "Other"
+
+dim(BUSCO_data)
+
+# Order Group
+BUSCO_data$Group<-factor(BUSCO_data$Group, levels = c("Other", "RI", "Founder"), ordered = TRUE)
+```
+
+```{r plot Number_Transcripts for main panel, include=TRUE, fig.width=11/3, fig.height=8/3}
+
+ggplot(BUSCO_data, aes(y = Group, x = C_pct)) +
+  geom_violin(aes(fill = Group, color=Group)) +
+  geom_quasirandom(
+    width = 0.1,
+    color = "grey25",
+    stroke = 0,
+    size = 0.75,
+    orientation = 'y'
+  ) +
+  #scale_color_manual(values = color_key$hex) +
+  scale_x_continuous(limits = c(95, 100)) +
+  JFMVTheme +
+  # set color manually for Group {Founder, Other, RI}
+  scale_color_manual(values = data_frame(
+    Group = c("RI", "Other", "Founder"),
+    color = c("#b7893a","#8b966d","#94509f")
+  )$color) +
+  scale_fill_manual(values = data_frame(
+    Group = c("RI", "Other", "Founder"),
+    color = c("#b7893a","#8b966d","#94509f")
+  )$color) +
+  theme(
+    axis.text.y       = element_text(angle = 0, hjust = 1, face = "bold", size=12),
+    axis.title.y      = element_text(size = 13, face = "bold"),
+    axis.text.x       = element_text(angle = 0, hjust = 0.5, face = "bold"),
+    axis.title.x      = element_text(size = 13, face = "bold"),
+    legend.position   = "none",
+    legend.direction  = "horizontal",   # ensure legend is laid out horizontally
+    legend.key.size   = unit(0.1, "in"),
+    legend.key.width  = unit(0.1, "in"),  # tighten key width
+    legend.spacing.y  = unit(0.01, "in"), # tighten spacing between legend items
+    legend.box.spacing = unit(0, "in"),   # remove extra spacing around the box
+    legend.margin     = margin(0, 0, 0, 0), # remove any margin around the legend
+    legend.text       = element_text(size = 10),
+    legend.title      = element_text(size = 10)
+  )+
+  labs(title = NULL, x = "%Core genes complete ", y = NULL)->p3
+
+p3
+
+# save plot
+ggsave("BUSCO.png", p3, width = 3.25, height = 2.3636)
+
+# save as svg
+ggsave("BUSCO.svg", p3, width = 3.25, height = 2.3636)
+```

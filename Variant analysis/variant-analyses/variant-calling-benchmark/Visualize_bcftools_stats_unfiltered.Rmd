@@ -1,0 +1,340 @@
+---
+title: "Summary statistics for bcftools stats results"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+stats_dir <- file.path(DATA_ROOT, "Variant_Calling_Benchmark/Stats_Results")
+
+knitr::opts_knit$set(root.dir = stats_dir)
+set.seed(0)
+
+require("ggplot2")
+require("cowplot")
+require("viridis")
+require("reshape2")
+require("dplyr")
+require("tidyverse")
+library(plotly)
+library(Rtsne)
+library(stringr)
+library(ggbeeswarm)
+library(ggforce)
+library(ggbreak)
+library(readr)
+
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+```
+
+```{r reader}
+read_bcftools_stats <- function(file,
+                                sections = c("SN","TSTV","SiS","AF","QUAL","IDD","ST","DP")) {
+  lines <- readLines(file)
+  stats <- list()
+  for(sec in sections) {
+    sec_lines <- grep(paste0("^", sec, "\t"), lines, value = TRUE)
+    if(length(sec_lines) == 0) next
+    df <- read.table(
+      text             = sub(paste0("^", sec, "\t"), "", sec_lines),
+      sep              = "\t",
+      header           = FALSE,
+      stringsAsFactors = FALSE,
+      fill             = TRUE
+    )
+    stats[[sec]] <- df
+  }
+  stats
+}
+```
+
+```{r load all files}
+files <- list.files(stats_dir, pattern = "\\.stats$", full.names = TRUE)
+
+sample_meta <- tibble(
+  file     = files,
+  basename = tools::file_path_sans_ext(basename(files))
+) %>%
+  mutate(
+    method = str_extract(basename, "^[^_]+"),
+    strain = str_extract(basename, "CC[0-9]+"),
+    method = recode(method,
+                    "bwa"                         = "bwa",
+                    "Founders-surjected-chr-sort" = "graph-surjected")
+  )
+
+all_stats <- map(sample_meta$file, read_bcftools_stats)
+names(all_stats) <- sample_meta$basename
+
+bind_section <- function(section, colnames_vec) {
+  map_dfr(names(all_stats), function(s) {
+    df <- all_stats[[s]][[section]]
+    if(is.null(df) || nrow(df) == 0) return(NULL)
+    colnames(df) <- colnames_vec[seq_len(ncol(df))]
+    df$sample <- s
+    df
+  }) %>%
+    left_join(sample_meta %>% select(basename, method, strain),
+              by = c("sample" = "basename"))
+}
+
+sn_all <- bind_section("SN", c("ID","key","value")) %>%
+  mutate(
+    key   = gsub("number of ", "", key),
+    key   = gsub(":", "", key),
+    value = suppressWarnings(as.numeric(value))
+  ) %>%
+  filter(!key %in% c("samples","no-ALTs"))
+
+tstv_all <- bind_section(
+  "TSTV",
+  c("ID","ts","tv","tstv","ts_1st","tv_1st","tstv_1st")
+) %>%
+  mutate(across(c(ts, tv, tstv, ts_1st, tv_1st, tstv_1st),
+                ~ suppressWarnings(as.numeric(.))))
+
+af_all <- bind_section(
+  "AF",
+  c("ID","allele_frequency","number_SNPs","number_transitions",
+    "number_transversions","number_indels",
+    "repeat_consistent","repeat_inconsistent","not_applicable")
+) %>%
+  mutate(across(c(allele_frequency, number_SNPs, number_transitions,
+                  number_transversions, number_indels),
+                ~ suppressWarnings(as.numeric(.))))
+
+idd_all <- bind_section("IDD", c("ID","length","count")) %>%
+  mutate(length = suppressWarnings(as.numeric(length)),
+         count  = suppressWarnings(as.numeric(count)))
+
+st_all <- bind_section("ST", c("ID","type","count")) %>%
+  mutate(count = suppressWarnings(as.numeric(count)))
+```
+
+# Overview
+
+```{r overview}
+sample_meta %>%
+  count(method, name = "n_samples") %>%
+  knitr::kable(caption = "Input files by method")
+```
+
+Loaded **`r nrow(sample_meta)`** `.stats` files spanning
+**`r n_distinct(sample_meta$strain)`** strains and
+**`r n_distinct(sample_meta$method)`** methods.
+
+# Cross-sample comparisons {.tabset .tabset-fade}
+
+## SN (summary numbers)
+
+```{r sn compare, fig.width=12, fig.height=9}
+ggplot(sn_all, aes(x = method, y = value, color = method)) +
+  geom_quasirandom(size = 1.2, alpha = 0.8) +
+  facet_wrap(~ key, scales = "free_y") +
+  labs(x = NULL, y = "Value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+```
+
+## Ts/Tv
+
+```{r tstv compare, fig.width=8, fig.height=4}
+tstv_long <- tstv_all %>%
+  select(sample, method, strain, tstv, tstv_1st) %>%
+  pivot_longer(c(tstv, tstv_1st), names_to = "type", values_to = "ratio")
+
+ggplot(tstv_long, aes(x = method, y = ratio, color = method)) +
+  geom_quasirandom(size = 1.5, alpha = 0.8) +
+  facet_wrap(~ type) +
+  labs(x = NULL, y = "Ts/Tv ratio") +
+  theme(legend.position = "none")
+```
+
+## Allele frequency
+
+```{r af compare, fig.width=12, fig.height=4}
+af_long <- af_all %>%
+  select(sample, method, strain, allele_frequency,
+         number_SNPs, number_transitions, number_transversions, number_indels) %>%
+  pivot_longer(c(number_SNPs, number_transitions,
+                 number_transversions, number_indels),
+               names_to = "metric", values_to = "count")
+
+ggplot(af_long,
+       aes(x = allele_frequency, y = count,
+           color = method, group = sample)) +
+  geom_line(alpha = 0.35) +
+  facet_wrap(~ metric, nrow = 1, scales = "free_y") +
+  labs(x = "Allele frequency", y = "Count") +
+  theme(legend.position = "top")
+```
+
+## Indel length distribution
+
+```{r idd compare, fig.width=10, fig.height=4}
+ggplot(idd_all,
+       aes(x = length, y = count, color = method, group = sample)) +
+  geom_line(alpha = 0.35) +
+  labs(x = "Length (deletions negative)", y = "Count") +
+  theme(legend.position = "top")
+```
+
+## Substitution types
+
+```{r st compare, fig.width=9, fig.height=4}
+ggplot(st_all,
+       aes(x = type, y = count / 1e6, color = method)) +
+  geom_quasirandom(dodge.width = 0.8, size = 1.2, alpha = 0.8) +
+  labs(x = "Substitution", y = "Count (x1e6)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "top")
+```
+
+# PCA of stats {.tabset .tabset-fade}
+
+```{r build feature matrix}
+sn_wide <- sn_all %>%
+  select(sample, key, value) %>%
+  pivot_wider(names_from = key, values_from = value, names_prefix = "SN_")
+
+tstv_wide <- tstv_all %>%
+  select(sample, tstv, tstv_1st) %>%
+  rename(TSTV_ratio = tstv, TSTV_ratio_1st = tstv_1st)
+
+st_wide <- st_all %>%
+  pivot_wider(id_cols = sample, names_from = type,
+              values_from = count, names_prefix = "ST_",
+              values_fn = sum)
+
+idd_wide <- idd_all %>%
+  mutate(bin = cut(length,
+                   breaks = c(-Inf, -50, -10, -1, 1, 10, 50, Inf),
+                   labels = c("del_gt50","del_10_50","del_1_10",
+                              "ins_1_10","ins_10_50","ins_gt50","other"))) %>%
+  group_by(sample, bin) %>%
+  summarise(count = sum(count, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = bin, values_from = count,
+              names_prefix = "IDD_", values_fill = 0)
+
+feat <- sn_wide %>%
+  left_join(tstv_wide, by = "sample") %>%
+  left_join(st_wide,   by = "sample") %>%
+  left_join(idd_wide,  by = "sample")
+
+mat <- feat %>% column_to_rownames("sample") %>% as.matrix()
+mat[is.na(mat)] <- 0
+mat <- mat[, apply(mat, 2, function(x) sd(x, na.rm = TRUE) > 0)]
+
+pca     <- prcomp(mat, scale. = TRUE)
+var_exp <- summary(pca)$importance[2, ]
+
+pca_df <- as.data.frame(pca$x) %>%
+  rownames_to_column("sample") %>%
+  left_join(sample_meta %>% select(basename, method, strain),
+            by = c("sample" = "basename"))
+```
+
+## PC1 vs PC2
+
+```{r pca12, fig.width=8, fig.height=6}
+p <- ggplot(pca_df,
+            aes(x = PC1, y = PC2, color = method,
+                text = paste0(strain, " (", method, ")"))) +
+  geom_point(size = 3, alpha = 0.85) +
+  labs(x = sprintf("PC1 (%.1f%%)", var_exp[1] * 100),
+       y = sprintf("PC2 (%.1f%%)", var_exp[2] * 100))
+plotly::ggplotly(p, tooltip = "text")
+```
+
+## PC2 vs PC3
+
+```{r pca23, fig.width=8, fig.height=6}
+p <- ggplot(pca_df,
+            aes(x = PC2, y = PC3, color = method,
+                text = paste0(strain, " (", method, ")"))) +
+  geom_point(size = 3, alpha = 0.85) +
+  labs(x = sprintf("PC2 (%.1f%%)", var_exp[2] * 100),
+       y = sprintf("PC3 (%.1f%%)", var_exp[3] * 100))
+plotly::ggplotly(p, tooltip = "text")
+```
+
+## Scree
+
+```{r scree, fig.width=6, fig.height=4}
+data.frame(PC = seq_along(var_exp), var = var_exp) %>%
+  head(15) %>%
+  ggplot(aes(x = PC, y = var)) +
+  geom_col(fill = "steelblue") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(y = "Variance explained")
+```
+
+## Top loadings
+
+```{r loadings}
+as.data.frame(pca$rotation[, 1:3]) %>%
+  rownames_to_column("feature") %>%
+  arrange(desc(abs(PC1))) %>%
+  head(25) %>%
+  knitr::kable(digits = 3, caption = "Top 25 features by |PC1 loading|")
+```
+
+# Per-sample reports {.tabset .tabset-dropdown}
+
+```{r per-sample, results='asis', fig.width=10, fig.height=3}
+for (s in sort(sample_meta$basename)) {
+  cat("\n\n## ", s, "\n\n", sep = "")
+
+  sn_s <- sn_all %>% filter(sample == s) %>% select(key, value)
+  if (nrow(sn_s) > 0) {
+    print(knitr::kable(sn_s, caption = "Summary numbers"))
+    cat("\n\n")
+  }
+
+  af_s <- af_all %>% filter(sample == s)
+  if (nrow(af_s) > 0) {
+    p_af <- ggplot(af_s, aes(x = allele_frequency, y = number_SNPs)) +
+      geom_col(fill = "steelblue") +
+      labs(title = "AF: number of SNPs", x = "AF", y = "SNPs")
+    print(p_af)
+    cat("\n\n")
+  }
+
+  idd_s <- idd_all %>% filter(sample == s)
+  if (nrow(idd_s) > 0) {
+    p_idd <- ggplot(idd_s, aes(x = length, y = count)) +
+      geom_col(fill = "steelblue") +
+      labs(title = "Indel length distribution",
+           x = "Length", y = "Count")
+    print(p_idd)
+    cat("\n\n")
+  }
+
+  st_s <- st_all %>% filter(sample == s)
+  if (nrow(st_s) > 0) {
+    p_st <- ggplot(st_s, aes(x = type, y = count)) +
+      geom_col(fill = "steelblue") +
+      labs(title = "Substitution types", x = NULL, y = "Count") +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    print(p_st)
+    cat("\n\n")
+  }
+}
+```

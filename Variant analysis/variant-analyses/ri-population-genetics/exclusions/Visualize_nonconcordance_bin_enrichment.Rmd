@@ -1,0 +1,510 @@
+---
+title: "Visualize non-concordance bin enrichment"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+set.seed(0)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "RI_Personalization/CC_genotype_comparison_to_muga_array/"))
+
+library(ggplot2)
+library(cowplot)
+library(scales)
+library("dplyr")
+library(factoextra)
+library(tidyr)
+source(file.path(REPO_ROOT, "shared-R", "CS_Aesthetic.R"))
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+library(ggrepel)
+library(gridExtra)
+library(reshape2)
+library(ggbeeswarm)
+
+library(ComplexUpset)
+library(dplyr)
+library(patchwork)
+library(data.table)
+```
+
+```{r import_data}
+fread("nonconcordance_bin_enrichment.bed") -> nonconcordance_bin_enrichment
+
+nonconcordance_bin_enrichment$oe_ratio <- (nonconcordance_bin_enrichment$obs_mean_animals_per_site + 1) / (nonconcordance_bin_enrichment$null_mean_animals_per_site + 1)
+
+dim(nonconcordance_bin_enrichment)
+# leave in only primary autosomes and sex chromosomes
+nonconcordance_bin_enrichment <- nonconcordance_bin_enrichment %>%
+  filter(chrom %in% c(paste0("chr", 1:19), "chrX"))
+dim(nonconcordance_bin_enrichment)
+
+# apply fdr correction to empirical_p_upper
+nonconcordance_bin_enrichment <- nonconcordance_bin_enrichment %>%
+  group_by(outcome) %>%
+  mutate(empirical_p_upper_fdr = p.adjust(empirical_p_upper, method = "fdr")) %>%
+  ungroup()
+
+
+```
+
+```{r plot n_sites_in_bin distribution, fig.width=4, fig.height=4}
+
+ggplot(nonconcordance_bin_enrichment, aes(x = n_sites_in_bin/1e3)) +
+  geom_histogram(binwidth = 0.5, fill = "steelblue", color = "black") +
+  theme_minimal() +
+  labs(title = "Distribution of n_sites_in_bin", x = "Number of Sites in Bin (thousands)", y = "Count") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_y_continuous(trans = 'log10', labels = comma) +
+  scale_x_continuous(trans = 'log10') +
+  facet_wrap(~outcome, scales = "free_x") +
+  geom_vline(xintercept = 4.06, linetype = "dashed", color = "red")
+
+
+ggplot(nonconcordance_bin_enrichment, aes(x = n_sites_in_bin/1e3)) +
+  geom_histogram(binwidth = 0.5, fill = "steelblue", color = "black") +
+  theme_minimal() +
+  labs(title = "Distribution of n_sites_in_bin", x = "Number of Sites in Bin (thousands)", y = "Count") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_y_continuous(labels = comma) +
+  scale_x_continuous() +
+  facet_wrap(~outcome, scales = "free_x") +
+  geom_vline(xintercept = 4.06, linetype = "dashed", color = "red")
+
+```
+
+```{r plot obs_sum_animals distribution, fig.width=4, fig.height=4}
+
+ggplot(nonconcordance_bin_enrichment, aes(x = obs_sum_animals)) +
+  geom_histogram(binwidth = 0.5, fill = "steelblue", color = "black") +
+  theme_minimal() +
+  labs(title = "Distribution of obs_sum_animals", x = "Observed Sum of Animals in Bin", y = "Count") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_y_continuous(trans = 'log10', labels = comma) +
+  scale_x_continuous(trans = 'log10') +
+  facet_wrap(~outcome, scales = "free_x")
+
+```
+
+
+```{r plot oe_ratio distribution, fig.width=4, fig.height=4}
+
+ggplot(nonconcordance_bin_enrichment, aes(x = oe_ratio)) +
+  geom_histogram(binwidth = 0.5, fill = "steelblue", color = "black") +
+  theme_minimal() +
+  labs(title = "Distribution of oe_ratio", x = "Observed/Expected Ratio in Bin", y = "Count") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_y_continuous(trans = 'log10', labels = comma) +
+  facet_wrap(~outcome, scales = "free_x") +
+  geom_vline(xintercept = 2, linetype = "dashed", color = "red")
+
+```
+
+
+```{r plot empirical_p_upper distribution, fig.width=4, fig.height=4}
+
+ggplot(nonconcordance_bin_enrichment, aes(x = empirical_p_upper)) +
+  geom_histogram(binwidth = 0.01, fill = "steelblue", color = "black") +
+  theme_minimal() +
+  labs(title = "Distribution of empirical_p_upper", x = "Empirical P-value (Upper Tail)", y = "Count") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  facet_wrap(~outcome, scales = "free_x") +
+  scale_x_continuous(limits = c(-0.05, 1.05))
+
+ggplot(nonconcordance_bin_enrichment, aes(x = empirical_p_upper_fdr)) +
+  geom_histogram(binwidth = 0.01, fill = "steelblue", color = "black") +
+  theme_minimal() +
+  labs(title = "Distribution of empirical_p_upper (FDR corrected)", x = "Empirical P-value (Upper Tail, FDR corrected)", y = "Count") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  facet_wrap(~outcome, scales = "free_x") +
+  scale_x_continuous(limits = c(-0.05, 1.05))
+
+
+
+Pval_Threshold <- 0.05
+
+nonconcordance_bin_enrichment %>%
+  group_by(outcome) %>%
+  summarize(n_significant_bins = sum(empirical_p_upper < Pval_Threshold)) %>%
+  ungroup()
+
+# How many significant bins do we have at FDR < 0.05?
+nonconcordance_bin_enrichment %>%
+  group_by(outcome) %>%
+  summarize(n_significant_bins = sum(empirical_p_upper_fdr < 0.005)) %>%
+  ungroup()
+
+```
+
+```{r plot heatmap of enrichment, fig.width=8, fig.height=5}
+# Create a heatmap of oe_ratio for each bin and outcome
+ggplot(nonconcordance_bin_enrichment, aes(x = start/1e6, y = outcome, fill = oe_ratio)) +
+  geom_tile() +
+  theme_minimal() +
+  labs(title = "Heatmap of Observed/Expected Ratio by Bin and Outcome", x = "Bin Start Position (kb)", y = "Outcome") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(labels = comma) +
+  facet_wrap(~chrom, scales = "free_x") +
+  scale_fill_viridis_c(option = "turbo", na.value = "grey90", begin = 0.9, end = 0.1)
+
+ggplot(nonconcordance_bin_enrichment, aes(x = start/1e6, y = outcome, fill = obs_mean_animals_per_site/40)) +
+  geom_tile() +
+  theme_minimal() +
+  labs(title = "Heatmap of Mean Observed Animals per Site by Bin and Outcome", x = "Bin Start Position (kb)", y = "Outcome", fill = "Mean\nObserved\nAnimals/Site") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(labels = comma) +
+  facet_wrap(~chrom, scales = "free_x") +
+  scale_fill_viridis_c(option = "plasma", na.value = "grey90", begin = 0.9, end = 0.1)
+
+```
+
+```{r plot heatmap of obs summed, fig.width=8, fig.height=3}
+# plot as above but take sum of obs_mean_animals_per_site across outcomes for each bin, and plot that as the fill color
+bin_obs_mean_animals_per_site <- nonconcordance_bin_enrichment %>%
+  group_by(chrom, start, end) %>%
+  summarize(sum_obs_mean_animals_per_site = sum(obs_mean_animals_per_site/40)) %>%
+  ungroup()
+
+ggplot(bin_obs_mean_animals_per_site, aes(x = start/1e6, y = 1, fill = sum_obs_mean_animals_per_site)) +
+  geom_tile() +
+  theme_minimal() +
+  labs(title = "Heatmap of Sum of Observed Animals per Site by Bin", x = "Bin Start Position (Mb)", y = "Chromosome", fill = "Sum\nObserved") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(labels = comma) +
+  facet_wrap(~chrom, scales = "free_x") +
+  scale_fill_viridis_c(option = "turbo", na.value = "grey90", begin = 0.9, end = 0.1) +
+  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+
+```
+
+```{r plot mean vs sd of obs summed, fig.width=4, fig.height=4}
+data.frame(
+  chrom = c(
+  "chr1",
+  "chr2",
+  "chr3",
+  "chr4",
+  "chr5",
+  "chr6",
+  "chr7",
+  "chr8",
+  "chr9",
+  "chr10",
+  "chr11",
+  "chr12",
+  "chr13",
+  "chr14",
+  "chr15",
+  "chr16",
+  "chr17",
+  "chr18",
+  "chr19",
+  "chrX"
+),
+mean = c(
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr1")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr2")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr3")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr4")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr5")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr6")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr7")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr8")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr9")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr10")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr11")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr12")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr13")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr14")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr15")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr16")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr17")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr18")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chr19")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  mean(subset(bin_obs_mean_animals_per_site, chrom=="chrX")$sum_obs_mean_animals_per_site, na.rm = TRUE)
+),
+sd = c(
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr1")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr2")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr3")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr4")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr5")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr6")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr7")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr8")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr9")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr10")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr11")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr12")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr13")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr14")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr15")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr16")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr17")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr18")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chr19")$sum_obs_mean_animals_per_site, na.rm = TRUE),
+  sd(subset(bin_obs_mean_animals_per_site, chrom=="chrX")$sum_obs_mean_animals_per_site, na.rm = TRUE)
+)
+) -> chrom_bind_obs_mean_animals_per_site__summary
+
+# plot mean vs sd of sum_obs_mean_animals_per_site by chrom
+ggplot(chrom_bind_obs_mean_animals_per_site__summary, aes(x = mean, y = sd)) +
+  geom_point() +
+  theme_minimal() +
+  labs(x = "Mean Sum of Observed Animals per Site in Bin", y = "SD of Sum of Observed Animals per Site in Bin") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_text_repel(aes(label = chrom), size = 3)
+
+```
+
+
+```{r plot histogram of summed, fig.width=4, fig.height=4}
+
+ggplot(bin_obs_mean_animals_per_site, aes(x=sum_obs_mean_animals_per_site)) +
+  geom_histogram(binwidth = 0.05, fill = "steelblue", color = "black") +
+  theme_minimal() +
+  labs(title = "Distribution of Sum of\nObserved Animals per Site in Bin", x = "Sum of Observed Animals per Site in Bin", y = "Count") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r plot histogram of summed for chr1 only, fig.width=4, fig.height=4}
+
+ggplot(subset(bin_obs_mean_animals_per_site, chrom=="chr1"), aes(x = sum_obs_mean_animals_per_site)) +
+  geom_histogram(binwidth = 0.05, fill = "steelblue", color = "black") +
+  geom_vline(xintercept = mean(subset(bin_obs_mean_animals_per_site, chrom=="chr1")$sum_obs_mean_animals_per_site, na.rm = TRUE), linetype = "dashed", color = "red")
+
+```
+
+
+```{r plot linegraph of obs summed, fig.width=8, fig.height=12}
+
+ggplot(bin_obs_mean_animals_per_site, aes(x = start/1e6, y = sum_obs_mean_animals_per_site)) +
+  geom_line() +
+  theme_minimal() +
+  labs(title = "Line Plot of Sum of Observed Animals per Site in Bin by Chromosome", x = "Bin Start Position (kb)", y = "Sum of Observed Animals per Site in Bin") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(labels = comma) +
+  facet_wrap(~chrom, scales = "free_x", ncol=2) +
+  scale_y_continuous(labels = comma) +
+  geom_hline(yintercept = mean(bin_obs_mean_animals_per_site$sum_obs_mean_animals_per_site, na.rm = TRUE), linetype = "dashed", color = "red") +
+    geom_hline(yintercept = mean(bin_obs_mean_animals_per_site$sum_obs_mean_animals_per_site, na.rm = TRUE)+1*sd(bin_obs_mean_animals_per_site$sum_obs_mean_animals_per_site, na.rm = TRUE), linetype = "dashed", color = "orange")
+
+```
+
+```{r plot heatmap of filtered summed, fig.width=8, fig.height=7}
+chrom_limits <- bin_obs_mean_animals_per_site %>%
+  group_by(chrom) %>%
+  summarize(
+    x0 = min(start, na.rm = TRUE) / 1e6,
+    x1 = max(end, na.rm = TRUE) / 1e6
+  ) %>%
+  ungroup()
+
+
+ggplot(bin_obs_mean_animals_per_site, aes(x = start/1e6, y = 1, fill = sum_obs_mean_animals_per_site)) +
+  geom_blank(data = chrom_limits, aes(x = x0, y = 1), inherit.aes = FALSE) +
+  geom_blank(data = chrom_limits, aes(x = x1, y = 1), inherit.aes = FALSE) +
+  geom_tile() +
+  theme_minimal() +
+  labs(
+    title = "Heatmap of Sum of Observed Animals per Site by Bin",
+    x = "Bin Start Position (Mb)",
+    y = "Chromosome",
+    fill = "Sum\nObserved"
+  ) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(labels = comma) +
+  facet_wrap(~chrom, scales = "free_x", ncol=2) +
+  scale_fill_viridis_c(option = "plasma", na.value = "grey90", begin = 0.9, end = 0.1) +
+  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+
+
+
+Threshold_SD_Multiplier <- 0
+genome_wide_mean <- mean(bin_obs_mean_animals_per_site$sum_obs_mean_animals_per_site, na.rm = TRUE)
+
+chrom_thresholds <- chrom_bind_obs_mean_animals_per_site__summary %>%
+  mutate(threshold = mean + Threshold_SD_Multiplier * sd)
+
+bin_obs_mean_animals_per_site_filtered <- bin_obs_mean_animals_per_site %>%
+  left_join(chrom_thresholds %>% select(chrom, mean, sd, threshold), by = "chrom") %>%
+  filter(sum_obs_mean_animals_per_site >= threshold & sum_obs_mean_animals_per_site >=0*genome_wide_mean)
+
+ggplot(bin_obs_mean_animals_per_site_filtered, aes(x = start/1e6, y = 1, fill = sum_obs_mean_animals_per_site)) +
+  geom_blank(data = chrom_limits, aes(x = x0, y = 1), inherit.aes = FALSE) +
+  geom_blank(data = chrom_limits, aes(x = x1, y = 1), inherit.aes = FALSE) +
+  geom_tile() +
+  theme_minimal() +
+  labs(
+    title = "Heatmap of Sum of Observed Animals per Site by Bin",
+    x = "Bin Start Position (Mb)",
+    y = "Chromosome",
+    fill = "Sum\nObserved"
+  ) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(labels = comma) +
+  facet_wrap(~chrom, scales = "free_x", ncol=2) +
+  scale_fill_viridis_c(option = "plasma", na.value = "grey90", begin = 0.9, end = 0.1) +
+  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+
+# save the filtered bins to a bed file
+bin_obs_mean_animals_per_site_filtered %>%
+  select(chrom, start, end, sum_obs_mean_animals_per_site) %>%
+  fwrite("nonconcordance_bin_enrichment_filtered.bed", sep = "\t", col.names = FALSE)
+```
+
+
+```{r plot heatmap of filtered summed with significant bins highlighted, fig.width=8, fig.height=7}
+# plotheatmap of significant bins only
+significant_bins <- nonconcordance_bin_enrichment %>%
+  filter(empirical_p_upper < Pval_Threshold)
+
+ggplot(significant_bins, aes(x = start/1e6, y = outcome, fill = n_sites_in_bin)) +
+  geom_tile() +
+  theme_minimal() +
+  labs(title = "Heatmap of Significant Bins (Empirical P < 0.05)", x = "Bin Start Position (Mb)", y = "Outcome", fill = "Number of\nSites in Bin") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(labels = comma) +
+  facet_wrap(~chrom, scales = "free_x") +
+  scale_fill_viridis_c(option = "magma", na.value = "grey90", begin = 0.9, end = 0.1)
+
+```
+
+
+```{r plot mean vs sd of mismatch obs summed, fig.width=4, fig.height=4}
+subset(nonconcordance_bin_enrichment, outcome=="Mismatch") -> mismatch_bin_enrichment
+
+data.frame(
+  chrom = c(
+  "chr1",
+  "chr2",
+  "chr3",
+  "chr4",
+  "chr5",
+  "chr6",
+  "chr7",
+  "chr8",
+  "chr9",
+  "chr10",
+  "chr11",
+  "chr12",
+  "chr13",
+  "chr14",
+  "chr15",
+  "chr16",
+  "chr17",
+  "chr18",
+  "chr19",
+  "chrX"
+),
+mean = c(
+  mean(subset(mismatch_bin_enrichment, chrom=="chr1")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chr2")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chr3")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chr4")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chr5")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chr6")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chr7")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chr8")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chr9")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chr10")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chr11")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chr12")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chr13")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chr14")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chr15")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chr16")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chr17")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chr18")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chr19")$obs_sum_animals, na.rm = TRUE),
+  mean(subset(mismatch_bin_enrichment, chrom=="chrX")$obs_sum_animals, na.rm = TRUE)
+),
+sd = c(
+  sd(subset(mismatch_bin_enrichment, chrom=="chr1")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chr2")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chr3")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chr4")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chr5")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chr6")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chr7")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chr8")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chr9")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chr10")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chr11")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chr12")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chr13")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chr14")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chr15")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chr16")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chr17")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chr18")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chr19")$obs_sum_animals, na.rm = TRUE),
+  sd(subset(mismatch_bin_enrichment, chrom=="chrX")$obs_sum_animals, na.rm = TRUE)
+)
+) -> chrom_bind_obs_sum_animals_per_site__summary
+
+# plot mean vs sd of sum_obs_mean_animals_per_site by chrom
+ggplot(chrom_bind_obs_sum_animals_per_site__summary, aes(x = mean, y = sd)) +
+  geom_point() +
+  theme_minimal() +
+  labs(x = "Mean Sum of Observed Animals per Site in Bin", y = "SD of Sum of Observed Animals per Site in Bin") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_text_repel(aes(label = chrom), size = 3)
+
+```
+
+```{r plot heatmap of obs summed for mismatch only, fig.width=8, fig.height=7}
+ggplot(mismatch_bin_enrichment, aes(x = start/1e6, y = 1, fill = obs_mean_animals_per_site/40)) +
+  geom_blank(data = chrom_limits, aes(x = x0, y = 1), inherit.aes = FALSE) +
+  geom_blank(data = chrom_limits, aes(x = x1, y = 1), inherit.aes = FALSE) +
+  geom_tile() +
+  theme_minimal() +
+  labs(
+    title = "Heatmap of Mean Observed Animals per Site by Bin (Mismatch Only)",
+    x = "Bin Start Position (Mb)",
+    y = "Chromosome",
+    fill = "Mean\nObserved\nAnimals/Site/40"
+  ) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(labels = comma) +
+  facet_wrap(~chrom, scales = "free_x", ncol=2) +
+  scale_fill_viridis_c(option = "magma", na.value = "grey90", begin = 0.9, end = 0.1) +
+  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+
+# order chromosomes by natural order
+mismatch_bin_enrichment$chrom <- factor(mismatch_bin_enrichment$chrom, levels = c(paste0("chr", 1:19), "chrX"))
+
+ggplot(mismatch_bin_enrichment, aes(x = start/1e6, y = 1, fill = obs_sum_animals/1e5)) +
+  geom_blank(data = chrom_limits, aes(x = x0, y = 1), inherit.aes = FALSE) +
+  geom_blank(data = chrom_limits, aes(x = x1, y = 1), inherit.aes = FALSE) +
+  geom_tile() +
+  theme_minimal() +
+  labs(
+    title = "Heatmap of Sum of Observed Animals per Site by Bin (Mismatch Only)",
+    x = "Bin Start Position (Mb)",
+    y = "Chromosome",
+    fill = "Sum\nObserved\nAnimals (x10^5)"
+  ) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(labels = comma) +
+  facet_wrap(~chrom, scales = "free_x", ncol=2) +
+  scale_fill_viridis_c(option = "magma", na.value = "grey90", begin = 0.9, end = 0.1) +
+  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+
+#save the mismatch_bin_enrichment to a bed file
+mismatch_bin_enrichment %>%
+  select(chrom, start, end, obs_sum_animals) %>%
+  fwrite("mismatch_bin_enrichment.bed", sep = "\t", col.names = FALSE)
+```

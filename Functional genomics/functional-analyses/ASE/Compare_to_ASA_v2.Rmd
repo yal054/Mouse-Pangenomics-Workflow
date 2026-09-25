@@ -1,0 +1,157 @@
+---
+title: "Compare ASE to ASA"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Pantranscriptome/Analyze_F1_RPVG_data_exploration/"))
+set.seed(0)
+
+require("ggplot2")
+require("cowplot")
+require("viridis")
+require("reshape2")
+require("dplyr")
+require("tidyverse")
+library(plotly)
+library(Rtsne)
+library(stringr)
+library(ggbeeswarm)
+
+library(DSS)
+
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+
+theme_set(theme_cowplot())
+
+library(data.table)
+```
+
+```{r read ASE}
+fread("DESeq2_ASE_results.txt") -> ASE
+```
+
+```{r read ASA}
+fread("mm10_ASE_aca.bed") -> ASA
+colnames(ASA) <- c("chr", "start", "end", "Transcript", "score", "strand", "peak_chr", "peak_start", "peak_end", "peak_strand", "HOMER_Annotation", "HOMER_Annotation_detailed","unknown","unknown2")
+```
+
+```{r subset for ASE data}
+subset(ASE, Transcript_cluster %in% ASA$Transcript) -> ASE_subset_in_ASA
+
+print(paste("There are", nrow(ASE_subset_in_ASA), "ASE results that have a corresponding ASA result."))
+print(paste("There are", nrow(ASE), "ASE results in total."))
+
+print(paste("There are ", nrow(ASA), "ASA results in total."))
+```
+
+```{r plot volcano, fig.width=4, fig.height=4}
+# plot the log2FoldChange of ASE_subset_in_ASA vs padj
+ggplot(ASE_subset_in_ASA, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(stroke=0, size=1.5) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red") +
+  labs(x = "log2FoldChange", y = "-log10(padj)") +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "blue") +
+  geom_vline(xintercept = -0.5, linetype = "dashed", color = "blue") +
+  theme_cowplot()
+
+```
+
+```{r plot histogram of log2FoldChange for significant ASE_subset_in_ASA, fig.width=4, fig.height=4}
+ggplot(subset(ASE_subset_in_ASA, padj < 0.05), aes(x=log2FoldChange)) +
+  geom_histogram(binwidth = 1, fill = "grey", color = "grey") +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = -0.5, linetype = "dashed", color = "red") +
+  labs(x = "log2FoldChange", y = "Count") +
+  theme_cowplot() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+
+ggplot(subset(ASE, padj < 0.05), aes(x=log2FoldChange)) +
+  geom_histogram(binwidth = 1, fill = "grey", color = "grey") +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = -0.5, linetype = "dashed", color = "red") +
+  labs(x = "log2FoldChange", y = "Count") +
+  theme_cowplot() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+
+```
+
+```{r get significant ASA_subset_in_DESeq}
+subset(ASE_subset_in_ASA, padj<0.05 & abs(log2FoldChange)>0.5) -> ASE_significant_in_ASA
+subset( ASA, Transcript %in% ASE_significant_in_ASA$Transcript_cluster ) -> ASA_subset_in_DESeq_significant
+
+ASA_subset_in_DESeq_significant$Transcript %>% unique()
+```
+
+```{r}
+fread("Founders-pantranscriptome-info.tsv") -> pantranscriptome_info
+
+subset(pantranscriptome_info, Transcripts %in% ASA_subset_in_DESeq_significant$Transcript) -> pantranscriptome_info_significant
+
+ASE_significant_in_ASA$Transcript_cluster %>% unique() -> GOI
+
+
+INDEX <- 5
+subset(ASA_subset_in_DESeq_significant, Transcript==GOI[INDEX])$Transcript
+subset(ASA_subset_in_DESeq_significant, Transcript==GOI[INDEX])
+
+subset(ASE_significant_in_ASA, Transcript_cluster==GOI[INDEX])
+
+subset(pantranscriptome_info_significant, Transcripts==GOI[INDEX])
+
+```
+
+```{r compare to eQTL data}
+fread("ASA_ASE_eQTL_Table.tsv") -> ASA_ASE_eQTL_Table
+
+print(paste("There are", nrow(ASA_ASE_eQTL_Table), "genes that show both significant ASE and ASA."))
+
+# Calculate the Spearman correlation between the Delta and Delta_coef columns without subsetting for haplotype match
+print("Correlation between Delta and Delta_coef for all genes:")
+cor.test(ASA_ASE_eQTL_Table$Delta,ASA_ASE_eQTL_Table$Delta_coef, method="spearman")
+
+print(paste("There are", nrow(subset(ASA_ASE_eQTL_Table, Haplotype_Match=="Yes")), "genes that show both significant ASE and ASA and have a haplotype match."))
+# Calculate the Spearman correlation between the Delta and Delta_coef columns for genes with a haplotype match
+print("Correlation between Delta and Delta_coef for genes with a haplotype match:")
+cor.test(subset(ASA_ASE_eQTL_Table, Haplotype_Match=="Yes")$Delta,subset(ASA_ASE_eQTL_Table, Haplotype_Match=="Yes")$Delta_coef, method="spearman")
+
+# How many are not Multiple_isoforms
+print(paste("There are", nrow(subset(ASA_ASE_eQTL_Table, Haplotype_Match=="Yes" & Multiple_isoforms=="No")), "genes that show both significant ASE and ASA, have a haplotype match, and do not have multiple isoforms."))
+
+# Calculate the Spearman correlation between the Delta and Delta_coef columns for genes with a haplotype match and no multiple isoforms
+print("Correlation between Delta and Delta_coef for genes with a haplotype match and no multiple isoforms:")
+cor.test(subset(ASA_ASE_eQTL_Table, Haplotype_Match=="Yes" & Multiple_isoforms=="No")$Delta,subset(ASA_ASE_eQTL_Table, Haplotype_Match=="Yes" & Multiple_isoforms=="No")$Delta_coef, method="spearman")
+```
+
+
+```{r notes regarding trait QTL}
+# Ceacam1 rdw2 and coefficents match diretion
+# Rhbdf1 and mchc2 but coefficietns delta are weak over QTL
+# Cep85 and mhgb1 and coefficients match direction
+# Serpine2 and gtt180, but coefficients are weak, though the biology is probably clearest
+# Eif4e3 no nearby QTL
+
+# Abcc6 no nearby QTL
+# Coa5 no nearby QTL
+# Cyp3a44 no nearby QTL
+# Mrfap1 no nearby QTL
+# Mtfr1 no nearby QTL
+# Gm20390 no nearby QTL
+# Pecr no nearby QTL
+# Mreg no nearby QTL
+# Fam213a no nearby QTL
+# 5830473C10Rik (aka Albfm1), is close to a Non-fasted albumin at 17 weeks QTL and coefficients match direction
+
+```

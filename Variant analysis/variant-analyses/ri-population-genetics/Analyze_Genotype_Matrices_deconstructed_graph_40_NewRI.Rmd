@@ -1,0 +1,744 @@
+---
+title: "Visualize upsent plot of genotype presence in assemblies"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+set.seed(0)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Graph_genetic_analysis_New_RI/PCA_on_deconstructed_founder_40_RI_graph/"))
+
+library(ggplot2)
+library(cowplot)
+library(scales)
+library("dplyr")
+library(factoextra)
+library(tidyr)
+source(file.path(REPO_ROOT, "shared-R", "CS_Aesthetic.R"))
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+library(ggrepel)
+library(gridExtra)
+library(reshape2)
+library(ggbeeswarm)
+
+library(ComplexUpset)
+library(dplyr)
+library(patchwork)
+```
+
+```{r fix data format}
+# Read the file as raw text to clean it
+raw_lines <- readLines("variant_genotypes_presence_absence_counts.txt")
+
+# Remove leading spaces and ensure tabs separate columns
+cleaned_lines <- gsub("^\\s+", "", raw_lines)  # Remove leading spaces
+cleaned_lines <- gsub(" ", "\t", cleaned_lines, fixed = TRUE)  # Convert spaces to tabs
+
+# Write the cleaned version to a temporary file
+cleaned_file <- tempfile()
+writeLines(cleaned_lines, cleaned_file)
+```
+
+```{r import data}
+# Read the cleaned file into a data frame
+genotype_data <- read.table(cleaned_file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+colnames(genotype_data)[1]<-"Count"
+
+# Remove the temporary file
+unlink(cleaned_file)
+
+# X field added at the end. Need to remove it and reorder columns to put Count at the beginning
+genotype_data<-genotype_data[, -ncol(genotype_data)]  # Remove the last column
+
+# Sort by Count
+genotype_data <- genotype_data[order(genotype_data$Count, decreasing = TRUE), ]
+
+rownames(genotype_data) <- NULL
+
+# At this point the file has a first column which is a count of the number of genotypes with a given pattern. All subsequent columns are 0 or 1 indicating the presence or absence of that genotype in a given animal.
+# So 300 0 1 0 1 0 0 means 300 genotypes with that pattern, and the genotype is present in the second and fourth animals, and absent in the first, third, fifth, and sixth animals.
+```
+
+```{r plot dist of counts}
+# Plot the distribution of counts
+ggplot(genotype_data, aes(x = Count)) +
+  geom_histogram(binwidth = 1) +
+  scale_x_continuous(labels = comma, trans = "log2") +
+  labs(title = "Distribution of Genotype Counts", x = "Count", y = "Number of patterns")+
+  JFMVTheme
+```
+
+```{r basic stats}
+# How many entries are there?
+print("Number of entries:")
+nrow(genotype_data)
+
+# Sum of counts
+print("Sum of counts:")
+sum(genotype_data$Count)
+```
+```{r cumulative sum}
+# Calculate the percent of Count (percent of sites)
+genotype_data$CountPercent<-genotype_data$Count/sum(genotype_data$Count)
+
+# reverse the order of the data frame
+genotype_data <- genotype_data[order(-genotype_data$Count), ]
+
+# Total number of genotypes
+sum(genotype_data$Count)->total_genotypes
+print("Total number of genotypes:")
+total_genotypes
+
+# Calculate the Founder sum of each genotype (sum the values in each row where the column name does not contain "CC0", "mm10, or "Count)
+## This is the number of founders with sharing a genotype at the same site
+genotype_data$FounderSum <- rowSums(genotype_data[, !grepl("CC0|mm10|Count|FounderSum|TotalSum", colnames(genotype_data))])
+
+# Calculate the  RI sum of each genotype (sum the values in each row where the column name contains "CC0")
+## This is the number of RI lines with sharing a genotype at the same site
+genotype_data$RISum <- rowSums(genotype_data[, grepl("CC0", colnames(genotype_data))])
+
+# Calculate total sum of genotypes
+## This is the total number of animals sharing a genotype at the same site
+genotype_data$TotalSum <- genotype_data$FounderSum + genotype_data$RISum
+```
+
+```{r convert format}
+# Calculate FounderSumPercent and RISumPercent
+genotype_data$FounderSumPercent <- genotype_data$FounderSum/7
+genotype_data$RISumPercent <- genotype_data$RISum/80
+# Respectively, this is the percent of founders and RI lines sharing a genotype at the same site (for that particular pattern of genotype sharing)
+
+dim(genotype_data)
+# Given this there are 386498 unique patterns of genotype sharing from the 75 RI lines and 7 founders
+
+# For each unique combination of FounderSumPercent and RISumPercent, sum the Count values as new data frame
+## With only {FounderSumPercent, RISumPercent, Count}
+genotype_RI_founder_percents <- genotype_data %>%
+  group_by(FounderSumPercent, RISumPercent) %>%
+  summarise(Count = sum(Count))
+
+dim(genotype_RI_founder_percents)
+# based on this there are 318 unique combinations of FounderSumPercent and RISumPercent
+
+sum(genotype_RI_founder_percents$Count)
+# Here count refers to the number of genotypes, not the number of patterns of genotype sharing
+
+# Calculate the percent of Count
+genotype_RI_founder_percents$CountPercent<-genotype_RI_founder_percents$Count/sum(genotype_RI_founder_percents$Count)
+
+# Plot Fraction of Founders with Genotype vs Fraction of that Genotype amongst all genotypes
+ggplot(genotype_RI_founder_percents, aes(x=100*FounderSumPercent,y=100*CountPercent))+
+  geom_point()
+
+# Plot Fraction of RI Lines with Genotype vs Fraction of that Genotype amongst all genotypes
+ggplot(genotype_RI_founder_percents, aes(x=100*RISumPercent,y=100*CountPercent))+
+  geom_point()
+
+ggplot(genotype_RI_founder_percents, aes(x=CountPercent))+
+  geom_histogram(bins=100)
+
+
+genotype_RI_founder_percents$FounderSumPercent*7->genotype_RI_founder_percents$FounderCount
+genotype_RI_founder_percents$RISumPercent*75->genotype_RI_founder_percents$RICount
+
+```
+
+```{r plot RI vs founder as scatterplot - Percent, include=TRUE, fig.width=5, fig.height=11/3}
+# plot as scatterplot
+ggplot(genotype_RI_founder_percents, aes(x=RISumPercent, y=FounderSumPercent, size=CountPercent, color=CountPercent)) +
+  #geom_vline(xintercept = 1/7, linetype = "dashed", color = "black", size = 0.5) +
+  #geom_vline(xintercept = 6/7, linetype = "dashed", color = "black", size = 0.5) +
+  geom_hline(yintercept = 0/7, linetype = "solid", color = "grey", size = 0.25) +
+  geom_hline(yintercept = 1/7, linetype = "solid", color = "grey", size = 0.25) +
+  geom_hline(yintercept = 2/7, linetype = "solid", color = "grey", size = 0.25) +
+  geom_hline(yintercept = 3/7, linetype = "solid", color = "grey", size = 0.25) +
+  geom_hline(yintercept = 4/7, linetype = "solid", color = "grey", size = 0.25) +
+  geom_hline(yintercept = 5/7, linetype = "solid", color = "grey", size = 0.25) +
+  geom_hline(yintercept = 6/7, linetype = "solid", color = "grey", size = 0.25) +
+  geom_hline(yintercept = 7/7, linetype = "solid", color = "grey", size = 0.25) +
+  geom_point(alpha=1, stroke=0)+
+  scale_color_viridis_c(option = "cividis", labels = percent) +
+  scale_size_continuous(range = c(0.1, 2.5), labels = percent) +
+  scale_x_continuous(labels = percent) +
+  scale_y_continuous(labels = percent) +
+  ylab("%Founders with genotype") +
+  xlab("%RI with genotype") +
+  JFMVTheme +
+  # Set background to white
+  theme(
+    panel.background = element_rect(fill = "grey90"),
+    legend.position = "right",
+    # remove grid lines
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+    ) -> scatterplot
+
+scatterplot
+```
+
+```{r plot RI vs founder as scatterplot - Count, include=TRUE, fig.width=5, fig.height=11/3}
+# plot as scatterplot
+ggplot(genotype_RI_founder_percents, aes(x=RICount/2, y=FounderCount, size=CountPercent, color=CountPercent)) +
+  geom_hline(yintercept = 0:7, linetype = "solid", color = "grey", linewidth = 0.25) +
+  geom_point(alpha=1, stroke=0, shape=15)+
+  scale_color_viridis_c(option = "cividis") +
+  scale_size_continuous(range = c(0.25, 3), labels = percent) +
+  scale_x_continuous() +
+  scale_y_continuous() +
+  ylab("# Founders with genotype") +
+  xlab("# RI with genotype") +
+  JFMVTheme +
+  # Set background to white
+  theme(
+    panel.background = element_rect(fill = "white"),
+    legend.position = "right",
+    # remove grid lines
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+    ) -> scatterplot
+
+scatterplot
+```
+
+```{r plot RI vs founder as scatterplot tile hybrid, include=TRUE, fig.width=5, fig.height=11/3}
+ggplot(genotype_RI_founder_percents, 
+       aes(x = RICount/2, y = FounderCount)) +
+  geom_tile(aes(fill   = CountPercent,
+                height = CountPercent*30,
+                width  = 1),
+            colour = NA) +
+  scale_fill_viridis_c(option = "cividis", labels = percent) +
+  ylab("# Founders with genotype") +
+  xlab("# RI with genotype") +
+  JFMVTheme +
+  theme(
+    panel.background = element_rect(fill = "white"),
+    legend.position    = "right"
+  ) -> scatterplot
+
+scatterplot
+```
+
+```{r save scatterplot}
+# Save as png
+ggsave("scatterplot_genotype_RI_founder_percents__forLegend.png", plot = scatterplot, width = 5, height = 11/3, dpi = 600)
+# Save as svg
+ggsave("scatterplot_genotype_RI_founder_percents__forLegend.svg", plot = scatterplot, width = 5, height = 11/3)
+
+# Remove legend
+scatterplot + theme(legend.position = "none") -> scatterplot
+
+# Save as png
+ggsave("scatterplot_genotype_RI_founder_percents.png", plot = scatterplot, width = 4, height = 11/3, dpi = 600)
+# Save as svg
+ggsave("scatterplot_genotype_RI_founder_percents.svg", plot = scatterplot, width = 4, height = 11/3)
+```
+
+```{r plot RI vs founder heatmap, include=TRUE, fig.width=4, fig.height=(11/3)+0.5}
+# Plot as heatmap
+heatmap_plot<-ggplot(genotype_RI_founder_percents, aes(y = FounderSumPercent, x = RISumPercent, fill=CountPercent)) +
+  geom_tile() +
+  scale_y_continuous(labels = percent, expand = c(0,0)) +
+  scale_x_continuous(labels = percent, expand = c(0,0)) +
+  # fill as a percentage value
+  scale_fill_viridis_c(labels = percent, limits = c(0, 0.1), option = "plasma") +
+  ylab("%Founders with genotype") +
+  xlab("%RI with genotype") +
+  JFMVTheme+
+  # Set background to white
+  theme(panel.background = element_rect(fill = "grey90")) +
+  # Get rid of grid lines
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  # Set legened labels
+  labs(fill = "%Genotypes") +
+  # Adjust legend key height and text position
+  #ggtitle("Genotype frequency\nbetween populations") +
+  theme(legend.position = "bottom", 
+      axis.ticks.length = unit(0.03, "in"),
+      legend.text = element_text(size = 7), 
+      legend.title = element_text(size = 9.6),
+      axis.text.x = element_text(size = 7),
+      axis.text.y = element_text(size = 7),
+      axis.title.x = element_text(size = 11.2),
+      axis.title.y = element_text(size = 11.2, margin = margin(r = 1, l=5)),
+  ) +
+  theme(
+    plot.title.position = "plot",
+    plot.title = element_text(size = 13, face = "bold", margin = margin(l=35, t = 0, b=2.5)),
+    axis.text.y = element_text(margin = margin(r = 1)),
+    plot.margin = margin(t=2.5, r=10, b=10, l=0.5),             # optional: remove outer plot margin
+  ) +
+  geom_hline(yintercept = 1/7+1/14, linetype = "dashed", color = "grey", size = 0.25)+
+  geom_hline(yintercept = 0/7+1/14, linetype = "dashed", color = "grey", size = 0.25)+
+  geom_vline(xintercept = 1/7, linetype = "dashed", color = "grey", size = 0.25)+
+  geom_hline(yintercept = 6/7+1/14, linetype = "solid", color = "grey", size = 0.25)+
+  geom_hline(yintercept = 6/7-1/14, linetype = "solid", color = "grey", size = 0.25)+
+  geom_vline(xintercept = 6/7, linetype = "solid", color = "grey", size = 0.25)+
+  guides(fill = guide_colorbar(title.position = "top", title.hjust = 0, title.vjust = -2, label.position = "bottom"))
+
+heatmap_plot
+```
+
+```{r save heatmap}
+# Save as png
+ggsave("heatmap_genotype_RI_founder_percents__forLegend.png", plot = heatmap_plot, width = 4, height = 11/3, dpi = 600)
+
+# Save as svg
+ggsave("heatmap_genotype_RI_founder_percents__forLegend.svg", plot = heatmap_plot, width = 4, height = 11/3)
+
+heatmap_plot + theme(legend.position = "none")->heatmap_plot
+
+# Save as png
+ggsave("heatmap_genotype_RI_founder_percents.png", plot = heatmap_plot, width = 4, height = 11/3, dpi = 600)
+
+# Save as svg
+ggsave("heatmap_genotype_RI_founder_percents.svg", plot = heatmap_plot, width = 4, height = 11/3)
+
+# Save plot as Robject to import into other Rmd files
+saveRDS(heatmap_plot, "heatmap_genotype_RI_founder_percents.Robject")
+```
+
+```{r what founders do the one of seven founder variants come from}
+subset(genotype_data, FounderSumPercent==1/7)-> Founder_1_7_Variants
+
+data.frame(
+  Strain=c("C57BL_6","129S1/SvImJ", "A/J", "CAST/EiJ", "NOD/ShiLtJ", "NZO/HlLtJ", "PWK/PhJ", "WSB/EiJ"),
+  Percent=c(
+    sum(subset(Founder_1_7_Variants, Founder_1_7_Variants$C57BL_6==1)$CountPercent),
+    sum(subset(Founder_1_7_Variants, Founder_1_7_Variants$X129S1_SvImJ==1)$CountPercent),
+    sum(subset(Founder_1_7_Variants, Founder_1_7_Variants$A_J==1)$CountPercent),
+    sum(subset(Founder_1_7_Variants, Founder_1_7_Variants$CAST_EiJ==1)$CountPercent),
+    sum(subset(Founder_1_7_Variants, Founder_1_7_Variants$NOD_ShiLtJ==1)$CountPercent),
+    sum(subset(Founder_1_7_Variants, Founder_1_7_Variants$NZO_HlLtJ==1)$CountPercent),
+    sum(subset(Founder_1_7_Variants, Founder_1_7_Variants$PWK_PhJ==1)$CountPercent),
+    sum(subset(Founder_1_7_Variants, Founder_1_7_Variants$WSB_EiJ==1)$CountPercent)
+  )
+) -> Founder_1_7_Variants_PercentPerFounder
+
+ggplot(Founder_1_7_Variants_PercentPerFounder, aes(x = Strain, y = Percent)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = percent, expand = c(0,0), limits = c(0, 0.3)) +
+  ylab("%Genotypes") +
+  xlab("Founder") +
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggrepel::geom_label_repel(aes(label = scales::percent(Percent)), size = 3, nudge_y = 0.01, show.legend = FALSE) +
+  ggtitle("1/7 Founder Variants")
+
+```
+
+```{r what founders do the two of seven founder variants come from}
+subset(genotype_data, FounderSumPercent==2/7)-> Founder_2_7_Variants
+
+data.frame(
+  Strain=c("C57BL_6","129S1/SvImJ", "A/J", "CAST/EiJ", "NOD/ShiLtJ", "NZO/HlLtJ", "PWK/PhJ", "WSB/EiJ"),
+  Percent=c(
+    sum(subset(Founder_2_7_Variants, Founder_2_7_Variants$C57BL_6==1)$CountPercent),
+    sum(subset(Founder_2_7_Variants, Founder_2_7_Variants$X129S1_SvImJ==1)$CountPercent),
+    sum(subset(Founder_2_7_Variants, Founder_2_7_Variants$A_J==1)$CountPercent),
+    sum(subset(Founder_2_7_Variants, Founder_2_7_Variants$CAST_EiJ==1)$CountPercent),
+    sum(subset(Founder_2_7_Variants, Founder_2_7_Variants$NOD_ShiLtJ==1)$CountPercent),
+    sum(subset(Founder_2_7_Variants, Founder_2_7_Variants$NZO_HlLtJ==1)$CountPercent),
+    sum(subset(Founder_2_7_Variants, Founder_2_7_Variants$PWK_PhJ==1)$CountPercent),
+    sum(subset(Founder_2_7_Variants, Founder_2_7_Variants$WSB_EiJ==1)$CountPercent)
+  )
+) -> Founder_2_7_Variants_PercentPerFounder
+
+ggplot(Founder_2_7_Variants_PercentPerFounder, aes(x = Strain, y = Percent)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = percent, expand = c(0,0), limits = c(0, 0.3)) +
+  ylab("%Genotypes") +
+  xlab("Founder") +
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggrepel::geom_label_repel(aes(label = scales::percent(Percent)), size = 3, nudge_y = 0.01, show.legend = FALSE) +
+  ggtitle("2/7 Founder Variants")
+```
+
+```{r what founders do the three of seven founder variants come from}
+subset(genotype_data, FounderSumPercent==3/7)-> Founder_3_7_Variants
+
+data.frame(
+  Strain=c("C57BL_6","129S1/SvImJ", "A/J", "CAST/EiJ", "NOD/ShiLtJ", "NZO/HlLtJ", "PWK/PhJ", "WSB/EiJ"),
+  Percent=c(
+    sum(subset(Founder_3_7_Variants, Founder_3_7_Variants$C57BL_6==1)$CountPercent),
+    sum(subset(Founder_3_7_Variants, Founder_3_7_Variants$X129S1_SvImJ==1)$CountPercent),
+    sum(subset(Founder_3_7_Variants, Founder_3_7_Variants$A_J==1)$CountPercent),
+    sum(subset(Founder_3_7_Variants, Founder_3_7_Variants$CAST_EiJ==1)$CountPercent),
+    sum(subset(Founder_3_7_Variants, Founder_3_7_Variants$NOD_ShiLtJ==1)$CountPercent),
+    sum(subset(Founder_3_7_Variants, Founder_3_7_Variants$NZO_HlLtJ==1)$CountPercent),
+    sum(subset(Founder_3_7_Variants, Founder_3_7_Variants$PWK_PhJ==1)$CountPercent),
+    sum(subset(Founder_3_7_Variants, Founder_3_7_Variants$WSB_EiJ==1)$CountPercent)
+  )
+) -> Founder_3_7_Variants_PercentPerFounder
+
+ggplot(Founder_3_7_Variants_PercentPerFounder, aes(x = Strain, y = Percent)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = percent, expand = c(0,0), limits = c(0, 0.3)) +
+  ylab("%Genotypes") +
+  xlab("Founder") +
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggrepel::geom_label_repel(aes(label = scales::percent(Percent)), size = 3, nudge_y = 0.01, show.legend = FALSE) +
+  ggtitle("3/7 Founder Variants")
+```
+
+```{r what founders do the four of seven founder variants come from}
+subset(genotype_data, FounderSumPercent==4/7)-> Founder_4_7_Variants
+
+data.frame(
+  Strain=c("C57BL_6","129S1/SvImJ", "A/J", "CAST/EiJ", "NOD/ShiLtJ", "NZO/HlLtJ", "PWK/PhJ", "WSB/EiJ"),
+  Percent=c(
+    sum(subset(Founder_4_7_Variants, Founder_4_7_Variants$C57BL_6==1)$CountPercent),
+    sum(subset(Founder_4_7_Variants, Founder_4_7_Variants$X129S1_SvImJ==1)$CountPercent),
+    sum(subset(Founder_4_7_Variants, Founder_4_7_Variants$A_J==1)$CountPercent),
+    sum(subset(Founder_4_7_Variants, Founder_4_7_Variants$CAST_EiJ==1)$CountPercent),
+    sum(subset(Founder_4_7_Variants, Founder_4_7_Variants$NOD_ShiLtJ==1)$CountPercent),
+    sum(subset(Founder_4_7_Variants, Founder_4_7_Variants$NZO_HlLtJ==1)$CountPercent),
+    sum(subset(Founder_4_7_Variants, Founder_4_7_Variants$PWK_PhJ==1)$CountPercent),
+    sum(subset(Founder_4_7_Variants, Founder_4_7_Variants$WSB_EiJ==1)$CountPercent)
+  )
+) -> Founder_4_7_Variants_PercentPerFounder
+
+ggplot(Founder_4_7_Variants_PercentPerFounder, aes(x = Strain, y = Percent)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = percent, expand = c(0,0), limits = c(0, 0.3)) +
+  ylab("%Genotypes") +
+  xlab("Founder") +
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggrepel::geom_label_repel(aes(label = scales::percent(Percent)), size = 3, nudge_y = 0.01, show.legend = FALSE) +
+  ggtitle("4/7 Founder Variants")
+```
+
+```{r what founders do the five of seven founder variants come from}
+subset(genotype_data, FounderSumPercent==5/7)-> Founder_5_7_Variants
+
+data.frame(
+  Strain=c("C57BL_6","129S1/SvImJ", "A/J", "CAST/EiJ", "NOD/ShiLtJ", "NZO/HlLtJ", "PWK/PhJ", "WSB/EiJ"),
+  Percent=c(
+    sum(subset(Founder_5_7_Variants, Founder_5_7_Variants$C57BL_6==1)$CountPercent),
+    sum(subset(Founder_5_7_Variants, Founder_5_7_Variants$X129S1_SvImJ==1)$CountPercent),
+    sum(subset(Founder_5_7_Variants, Founder_5_7_Variants$A_J==1)$CountPercent),
+    sum(subset(Founder_5_7_Variants, Founder_5_7_Variants$CAST_EiJ==1)$CountPercent),
+    sum(subset(Founder_5_7_Variants, Founder_5_7_Variants$NOD_ShiLtJ==1)$CountPercent),
+    sum(subset(Founder_5_7_Variants, Founder_5_7_Variants$NZO_HlLtJ==1)$CountPercent),
+    sum(subset(Founder_5_7_Variants, Founder_5_7_Variants$PWK_PhJ==1)$CountPercent),
+    sum(subset(Founder_5_7_Variants, Founder_5_7_Variants$WSB_EiJ==1)$CountPercent)
+  )
+) -> Founder_5_7_Variants_PercentPerFounder
+
+ggplot(Founder_5_7_Variants_PercentPerFounder, aes(x = Strain, y = Percent)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = percent, expand = c(0,0), limits = c(0, 0.3)) +
+  ylab("%Genotypes") +
+  xlab("Founder") +
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggrepel::geom_label_repel(aes(label = scales::percent(Percent)), size = 3, nudge_y = 0.01, show.legend = FALSE) +
+  ggtitle("5/7 Founder Variants")
+```
+
+```{r what founders do the six of seven founder variants come from}
+subset(genotype_data, FounderSumPercent==6/7)-> Founder_6_7_Variants
+
+data.frame(
+  Strain=c("C57BL_6","129S1/SvImJ", "A/J", "CAST/EiJ", "NOD/ShiLtJ", "NZO/HlLtJ", "PWK/PhJ", "WSB/EiJ"),
+  Percent=c(
+    sum(subset(Founder_6_7_Variants, Founder_6_7_Variants$C57BL_6==1)$CountPercent),
+    sum(subset(Founder_6_7_Variants, Founder_6_7_Variants$X129S1_SvImJ==1)$CountPercent),
+    sum(subset(Founder_6_7_Variants, Founder_6_7_Variants$A_J==1)$CountPercent),
+    sum(subset(Founder_6_7_Variants, Founder_6_7_Variants$CAST_EiJ==1)$CountPercent),
+    sum(subset(Founder_6_7_Variants, Founder_6_7_Variants$NOD_ShiLtJ==1)$CountPercent),
+    sum(subset(Founder_6_7_Variants, Founder_6_7_Variants$NZO_HlLtJ==1)$CountPercent),
+    sum(subset(Founder_6_7_Variants, Founder_6_7_Variants$PWK_PhJ==1)$CountPercent),
+    sum(subset(Founder_6_7_Variants, Founder_6_7_Variants$WSB_EiJ==1)$CountPercent)
+  )
+) -> Founder_6_7_Variants_PercentPerFounder
+
+ggplot(Founder_6_7_Variants_PercentPerFounder, aes(x = Strain, y = Percent)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = percent, expand = c(0,0), limits = c(0, 0.3)) +
+  ylab("%Genotypes") +
+  xlab("Founder") +
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggrepel::geom_label_repel(aes(label = scales::percent(Percent)), size = 3, nudge_y = 0.01, show.legend = FALSE) +
+  ggtitle("6/7 Founder Variants")
+
+```
+
+```{r what founders do the seven of seven founder variants come from}
+subset(genotype_data, FounderSumPercent==7/7)-> Founder_7_7_Variants
+
+data.frame(
+  Strain=c("C57BL_6","129S1/SvImJ", "A/J", "CAST/EiJ", "NOD/ShiLtJ", "NZO/HlLtJ", "PWK/PhJ", "WSB/EiJ"),
+  Percent=c(
+    sum(subset(Founder_7_7_Variants, Founder_7_7_Variants$C57BL_6==1)$CountPercent),
+    sum(subset(Founder_7_7_Variants, Founder_7_7_Variants$X129S1_SvImJ==1)$CountPercent),
+    sum(subset(Founder_7_7_Variants, Founder_7_7_Variants$A_J==1)$CountPercent),
+    sum(subset(Founder_7_7_Variants, Founder_7_7_Variants$CAST_EiJ==1)$CountPercent),
+    sum(subset(Founder_7_7_Variants, Founder_7_7_Variants$NOD_ShiLtJ==1)$CountPercent),
+    sum(subset(Founder_7_7_Variants, Founder_7_7_Variants$NZO_HlLtJ==1)$CountPercent),
+    sum(subset(Founder_7_7_Variants, Founder_7_7_Variants$PWK_PhJ==1)$CountPercent),
+    sum(subset(Founder_7_7_Variants, Founder_7_7_Variants$WSB_EiJ==1)$CountPercent)
+  )
+) -> Founder_7_7_Variants_PercentPerFounder
+
+ggplot(Founder_7_7_Variants_PercentPerFounder, aes(x = Strain, y = Percent)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = percent, expand = c(0,0), limits = c(0, 0.3)) +
+  ylab("%Genotypes") +
+  xlab("Founder") +
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggrepel::geom_label_repel(aes(label = scales::percent(Percent)), size = 3, nudge_y = 0.01, show.legend = FALSE) +
+  ggtitle("7/7 Founder Variants")
+```
+
+```{r what founders do the eight of eight founder variants come from}
+subset(genotype_data, FounderSumPercent==8/8)-> Founder_8_8_Variants
+
+data.frame(
+  Strain=c("C57BL_6","129S1/SvImJ", "A/J", "CAST/EiJ", "NOD/ShiLtJ", "NZO/HlLtJ", "PWK/PhJ", "WSB/EiJ"),
+  Percent=c(
+    sum(subset(Founder_8_8_Variants, Founder_8_8_Variants$C57BL_6==1)$CountPercent),
+    sum(subset(Founder_8_8_Variants, Founder_8_8_Variants$X129S1_SvImJ==1)$CountPercent),
+    sum(subset(Founder_8_8_Variants, Founder_8_8_Variants$A_J==1)$CountPercent),
+    sum(subset(Founder_8_8_Variants, Founder_8_8_Variants$CAST_EiJ==1)$CountPercent),
+    sum(subset(Founder_8_8_Variants, Founder_8_8_Variants$NOD_ShiLtJ==1)$CountPercent),
+    sum(subset(Founder_8_8_Variants, Founder_8_8_Variants$NZO_HlLtJ==1)$CountPercent),
+    sum(subset(Founder_8_8_Variants, Founder_8_8_Variants$PWK_PhJ==1)$CountPercent),
+    sum(subset(Founder_8_8_Variants, Founder_8_8_Variants$WSB_EiJ==1)$CountPercent)
+  )
+) -> Founder_8_8_Variants_PercentPerFounder
+
+ggplot(Founder_8_8_Variants_PercentPerFounder, aes(x = Strain, y = Percent)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = percent, expand = c(0,0), limits = c(0, 0.3)) +
+  ylab("%Genotypes") +
+  xlab("Founder") +
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggrepel::geom_label_repel(aes(label = scales::percent(Percent)), size = 3, nudge_y = 0.01, show.legend = FALSE) +
+  ggtitle("8/8 Founder Variants")
+```
+
+```{r prepare for founder in RI sum percent histogram}
+# For each founder calculate what percent of its genotypes are present in the RI
+bind_rows(
+data.frame(RISumPercent=subset(genotype_data, X129S1_SvImJ==1)$RISumPercent, Strain="129S1/SvImJ"),
+data.frame(RISumPercent=subset(genotype_data, A_J==1)$RISumPercent, Strain="A/J"),
+data.frame(RISumPercent=subset(genotype_data, CAST_EiJ==1)$RISumPercent, Strain="CAST/EiJ"),
+data.frame(RISumPercent=subset(genotype_data, NOD_ShiLtJ==1)$RISumPercent, Strain="NOD/ShiLtJ"),
+data.frame(RISumPercent=subset(genotype_data, NZO_HlLtJ==1)$RISumPercent, Strain="NZO/HlLtJ"),
+data.frame(RISumPercent=subset(genotype_data, PWK_PhJ==1)$RISumPercent, Strain="PWK/PhJ"),
+data.frame(RISumPercent=subset(genotype_data, WSB_EiJ==1)$RISumPercent, Strain="WSB/EiJ"),
+data.frame(RISumPercent=subset(genotype_data, C57BL_6==1)$RISumPercent, Strain="C57BL/6J"),
+) -> Founder_InRISumPercent_Hist_Prep
+
+genotype_data[1:10,1:8]
+# Order them
+Founder_InRISumPercent_Hist_Prep$Strain <- factor(Founder_InRISumPercent_Hist_Prep$Strain, levels = c("CAST/EiJ","PWK/PhJ","WSB/EiJ","129S1/SvImJ", "A/J", "NOD/ShiLtJ", "NZO/HlLtJ", "C57BL/6J"))
+```
+
+```{r plot founder in RI sum percent histogram, include=TRUE, fig.width=8, fig.height=3}
+# Plot as histogram faceted by strain
+Founder_InRISumPercent_Hist<-ggplot(Founder_InRISumPercent_Hist_Prep, aes(x = RISumPercent)) +
+  geom_histogram(binwidth = 1/80) +
+  scale_x_continuous(labels = percent, expand = c(0,0)) +
+  scale_y_continuous(labels = comma, expand = c(0,0)) +
+  ylab("#Genotypes") +
+  xlab("%RI with genotype") +
+  CS.THEME+
+  # Add facet wrap by strain with extra space between plots
+  facet_wrap(~Strain, ncol = 4)+
+  # make x axis text angle vertical
+  theme(axis.text.x = element_text(angle = 90, size=9, hjust = 0))
+
+Founder_InRISumPercent_Hist
+```
+
+```{r plot cumulative distribution, include=TRUE, fig.width=6, fig.height=3}
+# Initialize empty list to store CDFs
+cdf_list <- list()
+
+# Get unique strains
+unique_strains <- unique(Founder_InRISumPercent_Hist_Prep$Strain)
+
+# Manually compute CDF per strain
+for (strain in unique_strains) {
+  df <- Founder_InRISumPercent_Hist_Prep %>%
+    filter(Strain == strain) %>%
+    arrange(RISumPercent) %>%
+    mutate(CumulativeProb = cumsum(rep(1, n())) / n())  # Correctly count at or below each level
+
+  cdf_list[[strain]] <- df  # Store in list
+}
+
+# Combine all strains back into one dataframe
+Founder_CDF <- bind_rows(cdf_list)
+
+Founder_CDF$Color<-NA
+Founder_CDF$Color[grep("129S1", Founder_CDF$Strain)] <- "#E69F00"
+Founder_CDF$Color[grep("A/J", Founder_CDF$Strain)] <- "#F0E442"
+Founder_CDF$Color[grep("C57", Founder_CDF$Strain)] <- "#555555"
+Founder_CDF$Color[grep("CAST", Founder_CDF$Strain)] <- "#009E73"
+Founder_CDF$Color[grep("NOD", Founder_CDF$Strain)] <- "#0072B2"
+Founder_CDF$Color[grep("NZO", Founder_CDF$Strain)] <- "#56B4E9"
+Founder_CDF$Color[grep("PWK", Founder_CDF$Strain)] <- "#D55E00"
+Founder_CDF$Color[grep("CC0", Founder_CDF$Strain)] <- "#8b966d"
+Founder_CDF$Color[grep("WSB", Founder_CDF$Strain)] <- "#CC79A7"
+
+# Plot CDF
+Founder_CDF_Plot <- ggplot(Founder_CDF, aes(x = RISumPercent, y = CumulativeProb, color=Color)) +
+  geom_step(size = 1) +
+  scale_x_continuous(labels = percent, expand = c(0,0)) +
+  scale_y_continuous(labels = percent, expand = c(0,0), limits = c(0,1)) +
+  ylab("Cumulative Probability") +
+  xlab("%RI with genotype") +
+  CS.THEME+
+  scale_color_identity()
+
+Founder_CDF_Plot
+```
+
+```{r save CDF plot}
+ggsave("CDF_genotype_RI_founder_percents.png", plot = Founder_CDF_Plot, width = 6, height = 3, dpi = 300)
+
+# Save plot as Robject to import into other Rmd files
+saveRDS(Founder_CDF_Plot, "CDF_genotype_RI_founder_percents.Robject")
+```
+
+```{r determine per RI line founder IBS}
+
+# Define function to generate Founder IBS
+Founder_IBS<-function(RI_Line, genotype_data){
+  # For each RI line by founder, calculate the number of shared genotypes
+  bind_rows(
+    data.frame(Count=sum(subset(genotype_data, get(RI_Line)==1 & X129S1_SvImJ == 1)$Count), Strain="129S1/SvImJ"),
+    data.frame(Count=sum(subset(genotype_data, get(RI_Line)==1 & A_J == 1)$Count), Strain="A/J"),
+    data.frame(Count=sum(subset(genotype_data, get(RI_Line)==1 & CAST_EiJ == 1)$Count), Strain="CAST/EiJ"),
+    data.frame(Count=sum(subset(genotype_data, get(RI_Line)==1 & NOD_ShiLtJ == 1)$Count), Strain="NOD/ShiLtJ"),
+    data.frame(Count=sum(subset(genotype_data, get(RI_Line)==1 & NZO_HlLtJ == 1)$Count), Strain="NZO/HlLtJ"),
+    data.frame(Count=sum(subset(genotype_data, get(RI_Line)==1 & PWK_PhJ == 1)$Count), Strain="PWK/PhJ"),
+    data.frame(Count=sum(subset(genotype_data, get(RI_Line)==1 & WSB_EiJ == 1)$Count), Strain="WSB/EiJ"),
+    data.frame(Count=sum(subset(genotype_data, get(RI_Line)==1 & C57BL_6 == 1)$Count), Strain="C57BL/6J"),
+    data.frame(Count=sum(subset(genotype_data, get(RI_Line)==1 & X129S1_SvImJ != 1 & A_J != 1 & CAST_EiJ != 1 & NOD_ShiLtJ != 1 & NZO_HlLtJ != 1 & PWK_PhJ != 1 & WSB_EiJ != 1 & C57BL_6 != 1)$Count), Strain="De novo")
+  ) -> Founder_IBS_Prep
+
+  # Calculate the percent of Count
+  Founder_IBS_Prep$CountPercent<-Founder_IBS_Prep$Count/sum(Founder_IBS_Prep$Count)
+
+  # Add RI line name
+  Founder_IBS_Prep$RI_Line<-RI_Line
+  
+  return(Founder_IBS_Prep)
+}
+
+# Define list of RI lines
+RI_lines<-colnames(genotype_data)[!(colnames(genotype_data) %in% c("X129S1_SvImJ", "A_J", "CAST_EiJ", "NOD_ShiLtJ", "NZO_HlLtJ", "PWK_PhJ", "WSB_EiJ", "C57BL_6", "Count", "CountPercent", "FounderSum", "RISum", "TotalSum", "FounderSumPercent", "RISumPercent"))]
+
+# Calculate IBS for each RI line as loop and then bind_rows
+lapply(RI_lines, function(x) Founder_IBS(x, genotype_data)) %>% bind_rows() -> Founder_IBS
+
+# Add color to Founder_IBS
+Founder_IBS$Color<-NA
+Founder_IBS$Color[grep("129S1", Founder_IBS$Strain)] <- "#E69F00"
+Founder_IBS$Color[grep("A/J", Founder_IBS$Strain)] <- "#F0E442"
+Founder_IBS$Color[grep("C57", Founder_IBS$Strain)] <- "#555555"
+Founder_IBS$Color[grep("CAST", Founder_IBS$Strain)] <- "#009E73"
+Founder_IBS$Color[grep("NOD", Founder_IBS$Strain)] <- "#0072B2"
+Founder_IBS$Color[grep("NZO", Founder_IBS$Strain)] <- "#56B4E9"
+Founder_IBS$Color[grep("PWK", Founder_IBS$Strain)] <- "#D55E00"
+Founder_IBS$Color[grep("CC0", Founder_IBS$Strain)] <- "#8b966d"
+Founder_IBS$Color[grep("WSB", Founder_IBS$Strain)] <- "#CC79A7"
+
+# Order the strains
+Founder_IBS$Strain <- factor(Founder_IBS$Strain, levels = c("C57BL/6J", "NZO/HlLtJ", "129S1/SvImJ", "NOD/ShiLtJ", "A/J", "WSB/EiJ", "CAST/EiJ","PWK/PhJ","De novo"), ordered = TRUE)
+
+
+```
+
+```{r plot founder IBS in RI lines}
+# plot as barplot
+Founder_IBS_Plot<-ggplot(Founder_IBS, aes(x = Strain, y = CountPercent, fill=Color)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = percent, expand = c(0,0), limits = c(0, 0.20)) +
+  ylab("%Genotypes") +
+  xlab("RI Line") +
+  CS.THEME+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_viridis_d(option = "turbo")+
+  facet_wrap(~RI_Line, ncol = 5)+
+  # no legend
+  theme(legend.position = "none")+
+  geom_hline(yintercept = 1/8, linetype = "dashed", color = "black", size = 0.5)
+```
+
+```{r save founder IBS in RI lines}
+ggsave("Founder_IBS_in_RI_lines.png", plot = Founder_IBS_Plot, width = 12, height = 16, dpi = 300)
+
+# Save plot as Robject to import into other Rmd files
+saveRDS(Founder_IBS_Plot, "Founder_IBS_in_RI_lines.Robject")
+```
+
+```{r calculate group stats}
+round(mean(100*subset(Founder_IBS, Strain=="PWK/PhJ")$CountPercent), 2)
+round(sd(100*subset(Founder_IBS, Strain=="PWK/PhJ")$CountPercent), 2)
+
+round(mean(100*subset(Founder_IBS, Strain=="CAST/EiJ")$CountPercent), 2)
+round(sd(100*subset(Founder_IBS, Strain=="CAST/EiJ")$CountPercent), 2)
+
+round(mean(100*subset(Founder_IBS, Strain=="WSB/EiJ")$CountPercent), 2)
+round(sd(100*subset(Founder_IBS, Strain=="WSB/EiJ")$CountPercent), 2)
+
+round(mean(100*subset(Founder_IBS, Strain!="PWK/PhJ" & Strain!="CAST/EiJ" & Strain!="WSB/EiJ" & Strain!="De novo")$CountPercent), 2)
+round(sd(100*subset(Founder_IBS, Strain!="PWK/PhJ" & Strain!="CAST/EiJ" & Strain!="WSB/EiJ" & Strain!="De novo")$CountPercent), 2)
+```
+
+```{r plot per founder the distribution of genotypes in RI lines, fig.width=4, fig.height=11/3}
+Founds_IBS_Boxplot<-ggplot(subset(Founder_IBS, Strain!="De novo"), aes(x=Strain, y=CountPercent, fill=Color))+
+  geom_violin() +
+  geom_quasirandom(
+    width = 0.35,
+    color = "grey50",
+    stroke = 0,
+    size = 0.35,
+    orientation = 'x'
+  ) +
+  scale_fill_identity() +
+  # set y axis breaks to 0.05, 0.1, 0.15
+  scale_y_continuous(labels = percent, expand = c(0,0), limits = c(0.05, 0.175), breaks = seq(0.05, 0.175, by = 0.05)) +
+  ylab("Alleles IBS (%)") +
+  xlab(NULL) +
+  JFMVTheme +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(legend.position = "none")+
+  geom_hline(yintercept = 1/8, linetype = "dashed", color = "black", size = 0.5)
+
+Founds_IBS_Boxplot
+
+```
+
+```{r save per founder the distribution of genotypes in RI lines}
+ggsave("Founds_IBS_Boxplot.png", plot = Founds_IBS_Boxplot, width = 4, height = (180.0243/299.0567)*4, dpi = 300)
+
+# save as svg
+ggsave("Founds_IBS_Boxplot.svg", plot = Founds_IBS_Boxplot, width = 4, height = (180.0243/299.0567)*4)
+
+# Save plot as Robject to import into other Rmd files
+saveRDS(Founds_IBS_Boxplot, "Founds_IBS_Boxplot.Robject")
+```

@@ -1,0 +1,2276 @@
+---
+title: "Collaborative Cross compare loci in deconstructed graph - founder + 40 RI lines"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+COLCROSS_ROOT <- "" # parent Collaborative Cross project directory
+```
+
+```{r setup, include=FALSE}
+set.seed(0)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Graph_genetic_analysis_New_RI/PCA_on_deconstructed_founder_40_RI_graph_Norm/"))
+
+library(ggplot2)
+library(cowplot)
+library(scales)
+library("dplyr")
+library(factoextra)
+library(tidyr)
+source(file.path(REPO_ROOT, "shared-R", "CS_Aesthetic.R"))
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+library(ggrepel)
+library(factoextra)
+library(ggbreak)
+library(purrr)
+library(stringr)
+```
+
+```{r load_data}
+library(data.table)
+# Load processed genotypes
+Processed_Genotypes<-data.table::fread("Processed_variant_genotypes_simplified.txt")
+
+# remove sex chromosomes
+nrow(Processed_Genotypes)
+Processed_Genotypes<-subset(Processed_Genotypes, CHROM!="chrY" & CHROM!="chrX" & CHROM!="CHROM")
+nrow(Processed_Genotypes)
+```
+
+```{r count number of loci per chromosome, include=TRUE}
+table(Processed_Genotypes$CHROM)
+```
+
+```{r generate basic stats for processed genotypes, include=TRUE}
+# Generate basic stats for processed genotypes
+## Number of loci
+NumberTotal<-nrow(Processed_Genotypes)
+
+## Number of loci where in Unique_Genotypes there is a "." genotype, indicating missing data
+### The Unique_Genotypes values are , delimited genotypes e.g. .,0,1,2 is four genotypes, the first one missing data
+NumberMissing<-sum(grepl("\\.", Processed_Genotypes$Unique_Genotypes))
+
+## Total number of loci per chromosome
+Processed_Genotypes %>% group_by(CHROM) %>% summarise(Numberloci=n()) -> lociPerChromosome
+
+## Number of missing data loci per chromosome
+Processed_Genotypes %>% filter(grepl("\\.", Unique_Genotypes)) %>% group_by(CHROM) %>% summarise(NumberMissing=n()) -> MissingPerChromosome
+
+# make sure every chromosome is represented in the MissingPerChromosome dataframe, if a chromosome is missing, add a row with 0 missing loci for that chromosome
+all_chromosomes<-unique(Processed_Genotypes$CHROM)
+for (chrom in all_chromosomes) {
+  if (!(chrom %in% MissingPerChromosome$CHROM)) {
+    MissingPerChromosome<-rbind(MissingPerChromosome, data.frame(CHROM=chrom, NumberMissing=0))
+  }
+}
+
+## Merge the two dataframes
+lociPerChromosome<-merge(lociPerChromosome, MissingPerChromosome, by="CHROM", all.x=TRUE)
+lociPerChromosome$NumberMissing[is.na(lociPerChromosome$NumberMissing)]<-0
+
+## Calculate non-missing data loci
+lociPerChromosome$NumberNonMissing<-lociPerChromosome$Numberloci-lociPerChromosome$NumberMissing
+
+## Make long format for plotting, combine missing and non-missing number values
+gather(lociPerChromosome, key="Type", value="Number", NumberMissing:NumberNonMissing) -> lociPerChromosome_Long
+### Change "NumberMissing" to "Missing" and "NumberNonMissing" to "None Missing"
+lociPerChromosome_Long$Type<-gsub("Number", "", lociPerChromosome_Long$Type)
+lociPerChromosome_Long$Type<-gsub("NonMissing", "None Missing", lociPerChromosome_Long$Type)
+
+## Sort chromosomes as factors chr1, chr2, chr3, ... chr19
+lociPerChromosome_Long$CHROM<-factor(lociPerChromosome_Long$CHROM, levels=paste0("chr", c(1:19)))
+
+## Plot as stacked bar plot
+ggplot(lociPerChromosome_Long, aes(x=CHROM, y=Number/1000000, fill=Type))+
+  geom_bar(stat="identity", position="stack")+
+  scale_fill_manual(values=c("#f04857", "#2d5879"))+
+  theme(axis.text.x=element_text(angle=45, hjust=1))+
+  labs(title="Number of loci per chromosome", x="Chromosome", y="Number of loci (M)", fill="")+
+  theme(legend.position="bottom")+
+  CS.THEME+
+  # make y axis labels with commas
+  # fill space below the bars
+  scale_y_continuous(labels=comma, expand=c(0,0.1))
+```
+```{r subset out the missing data loci}
+# Subset out the missing data loci
+Processed_Genotypes %>% filter(grepl("\\.", Unique_Genotypes)) -> Processed_Genotypes_Missing
+
+# removed unfiltered set and import black list filtered set
+rm(Processed_Genotypes)
+Processed_Genotypes<-data.table::fread("Processed_variant_genotypes_simplified.filtered_by_fixed_blacklist.txt")
+```
+
+```{r count up founder versus RI exclusivity, include=TRUE}
+# Convert RI_Only, Both, and Founder_Only to numeric
+Processed_Genotypes$RI_Only<-as.numeric(Processed_Genotypes$RI_Only)
+Processed_Genotypes$Both<-as.numeric(Processed_Genotypes$Both)
+Processed_Genotypes$Founder_Strain_Only<-as.numeric(Processed_Genotypes$Founder_Strain_Only)
+
+# Generate basic stats for processed genotypes
+table(Processed_Genotypes$RI_Only)-> RI_Only_table
+table(Processed_Genotypes$Founder_Strain_Both)-> Both_table
+table(Processed_Genotypes$Founder_Strain_Only)-> Founder_Only_table
+```
+
+```{r print percentage of loci with RI only genotypes, include=TRUE}
+# What percent of loci have RI only genotypes?
+RI_Only_table<-as.data.frame(RI_Only_table)
+sum(Processed_Genotypes$Var1>0)/nrow(Processed_Genotypes)*100
+```
+
+```{r print percentage of loci with Founder only genotypes, include=TRUE}
+# What percent of loci have Founder only genotypes?
+Founder_Only_table<-as.data.frame(Founder_Only_table)
+
+# Founder only sites at least one genotype unique to founders {counting redundant assemblies seperately}
+sum(Processed_Genotypes$Founder_Only>0, na.rm = TRUE)/nrow(Processed_Genotypes)*100
+
+# Founder only sites at least one genotype unique to founders {counting redundant assemblies together}
+sum(Processed_Genotypes$Founder_Strain_Only>0, na.rm = TRUE)/nrow(Processed_Genotypes)*100
+```
+
+```{r plot distribution of RI only genotypes, include=TRUE}
+# Plot count of RI only genotypes using a RI_Only_table dataframe
+RI_Only_table<-as.data.frame(RI_Only_table)
+
+ggplot(RI_Only_table, aes(x=Var1, y=Freq))+
+  geom_bar(stat="identity", fill="#f04857", color="black")+
+  labs(title="Distribution of RI only genotypes", x="Number of RI only genotypes", y="Number of loci")+
+  CS.THEME+
+  # make y axis labels with commas in thousands
+  scale_y_continuous(labels=comma, trans="log10")
+```
+
+```{r plot distribution of Founder only genotypes, include=TRUE}
+# Plot count of Founder only genotypes using a Founder_Only_table dataframe
+Founder_Only_table<-as.data.frame(Founder_Only_table)
+
+ggplot(Founder_Only_table, aes(x=Var1, y=Freq))+
+  geom_bar(stat="identity", fill="#2d5879", color="black")+
+  labs(title="Distribution of Founder only genotypes", x="Number of Founder only genotypes", y="Number of loci")+
+  CS.THEME+
+  # make y axis labels with commas in thousands
+  scale_y_continuous(labels=comma, trans="log10")
+```
+
+```{r plot distribution of Both genotypes, include=TRUE}
+# Plot count of Both genotypes using a Both_table dataframe
+Both_table<-as.data.frame(Both_table)
+
+ggplot(Both_table, aes(x=Var1, y=Freq))+
+  geom_bar(stat="identity", fill="purple", color="black")+
+  labs(title="Distribution of Both genotypes", x="Number of Both genotypes", y="Number of loci")+
+  CS.THEME+
+  # make y axis labels with commas in thousands
+  scale_y_continuous(labels=comma, trans="log10")
+```
+
+```{r generate RI only bins}
+# Define bin size (in base pairs)
+bin_size <- 1000000  # 1 Mb bins
+
+# Create a new column for bin assignment
+Processed_Genotypes$Bin <- floor(as.numeric(Processed_Genotypes$POS) / bin_size) * bin_size
+
+# Summarize RI-only genotype counts per bin
+RI_only_bins <- Processed_Genotypes %>%
+  filter(RI_Only > 0) %>%
+  group_by(CHROM, Bin) %>%
+  summarise(Number_of_RI_Only_Loci = n(), .groups = "drop")
+
+# Ensure correct ordering of chromosomes for plotting
+RI_only_bins$CHROM <- factor(RI_only_bins$CHROM, levels=paste0("chr", c(1:19)))
+
+# Import chromosome lengths to make sure to plot full chromosomes
+chrom_lengths <- read.delim(file.path(COLCROSS_ROOT, "assembly_lengths_for_75_RI_and_founders/all_strains_chromosome_lengths.tsv"), header = FALSE, sep = "\t")
+colnames(chrom_lengths) <- c("Assembly","CHROM", "LENGTH")
+
+# Filter to only include the GRCm39 assembly
+chrom_lengths<-subset(chrom_lengths, Assembly=="GRCm38.p6.renamed.filtered.fa")
+# drop sex chromosomes and chrM
+chrom_lengths<-subset(chrom_lengths, CHROM!="chrY" & CHROM!="chrX" & CHROM!="chrM")
+
+# For each chromosome, add a row with the last bin to ensure full chromosome is plotted. Where the last bin is the chromosome length
+chrom_lengths %>% mutate(Bin = LENGTH - LENGTH %% bin_size) -> last_bin_per_chrom
+
+# Add the last bin to the RI_only_bins dataframe
+RI_only_bins %>% bind_rows(last_bin_per_chrom) -> RI_only_bins
+
+# Make CHROM a factor sorted by chromosome number
+RI_only_bins$CHROM <- factor(RI_only_bins$CHROM, levels = paste0("chr", c(1:19)))
+```
+
+```{r plot heatmap of RI only bins}
+# Plot binned RI-only loci along the genome as heatmap
+ggplot(RI_only_bins, aes(x = Bin/1000000, y = CHROM, fill = Number_of_RI_Only_Loci )) +
+  geom_tile() +
+  # Set the colour scale to viridis, with the "magma" option, and set the na.value to grey90, and the begin and end to 0 and 0.7, and make the scale fill log10 transformed
+  scale_fill_viridis_c(option = "turbo", na.value = "grey70", begin=0.3, end=0, trans="log10", labels=comma) +
+  labs(title = NULL, x = NULL, y = NULL, fill = "Number of RI-only loci") +
+  theme(
+  panel.background = element_rect(fill="white"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines	
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank()
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey70"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 5)+
+  # Remove y axis labels
+  theme(axis.text.y = element_blank())+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1))+
+  # make legend wider
+  theme(legend.key.width = unit(1, "cm"))+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())->RI_only_bins_heatmap
+
+# Save the plot
+ggsave("RI_only_bins_heatmap.png", RI_only_bins_heatmap, width=26, height=4.1, dpi=600)
+
+# Save Robject
+saveRDS(RI_only_bins_heatmap, "RI_only_bins_heatmap.rds")
+```
+
+```{r plot heatmap of RI only bins v2 second}
+ggplot(RI_only_bins, aes(x = Bin/1000000, y = CHROM, fill = Number_of_RI_Only_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", na.value = "black", begin=0, end=0.7, trans="log10", labels=comma) +
+  labs(title = NULL, x = "Position (Mb)", y = NULL, fill = "# RI specific loci") +
+  theme(
+  panel.background = element_rect(fill="grey90"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank(),
+  axis.title.x = element_text(size = 10)
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey90"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 2, dir = "v")+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1), expand = c(0,0))+
+  scale_y_discrete(expand = c(0,0))+
+  # make legend wider
+  theme(legend.key.width = unit(0.15, "in"),
+        legend.key.height = unit(0.1, "in")
+    )->RI_only_bins_heatmap2
+
+RI_only_bins_heatmap2
+
+# Save the plot
+ggsave("RI_Only_bins_heatmap_v2.png", RI_only_bins_heatmap2, width=3.98, height=5, dpi=600)
+
+# Save Robject
+saveRDS(RI_only_bins_heatmap2, "RI_Only_bins_heatmap_v2.rds")
+```
+
+```{r plot heatmap of RI only bins only chr17, include=TRUE, fig.width=4, fig.height=1.35/1.5}
+ggplot(subset(RI_only_bins, CHROM=="chr17"), aes(x = Bin/1000000, y = CHROM, fill = Number_of_RI_Only_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", na.value = "black", begin=0, end=0.7, trans="log10", labels=comma) +
+  labs(title = NULL, x = "Position (Mb)", y = NULL, fill = "# Founder specific loci") +
+  theme(
+  panel.background = element_rect(fill="grey90"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank(),
+  axis.title.x = element_text(size = 10)
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey90"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 2, dir = "v")+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1), expand = c(0,0))+
+  scale_y_discrete(expand = c(0,0))+
+  # make legend wider
+  theme(legend.key.width = unit(0.15, "in"),
+        legend.key.height = unit(0.1, "in")
+    )->RI_only_bins_heatmap_only17
+
+RI_only_bins_heatmap_only17->RI_only_bins_heatmap_only17_with_Legend
+
+# remove the legend
+RI_only_bins_heatmap_only17_with_Legend + theme(legend.position = "none") -> RI_only_bins_heatmap_only17
+
+# plot
+RI_only_bins_heatmap_only17
+
+# Save the plot
+ggsave("RI_only_bins_heatmap_only_chr17.png", RI_only_bins_heatmap_only17, width=4, height=1.35/1.5, dpi=600)
+ggsave("RI_only_bins_heatmap_only_chr17.svg", RI_only_bins_heatmap_only17, width=4, height=1.35/1.5, dpi=600)
+# Save the plot with legend
+ggsave("RI_only_bins_heatmap_only_chr17_with_legend.png", RI_only_bins_heatmap_only17_with_Legend, width=4, height=1.35, dpi=600)
+ggsave("RI_only_bins_heatmap_only_chr17_with_legend.svg", RI_only_bins_heatmap_only17_with_Legend, width=4, height=1.35, dpi=600)
+
+# Save Robject
+saveRDS(RI_only_bins_heatmap_only17, "Founder_only_bins_heatmap_only_chr17.rds")
+saveRDS(RI_only_bins_heatmap_only17_with_Legend, "Founder_only_bins_heatmap_only_chr17_with_Legend.rds")
+```
+
+```{r plot heatmap of RI only bins only chr15, include=TRUE, fig.width=4, fig.height=1.35/1.5}
+ggplot(subset(RI_only_bins, CHROM=="chr15"), aes(x = Bin/1000000, y = CHROM, fill = Number_of_RI_Only_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", na.value = "black", begin=0, end=0.7, trans="log10", labels=comma) +
+  labs(title = NULL, x = "Position (Mb)", y = NULL, fill = "# Founder specific loci") +
+  theme(
+  panel.background = element_rect(fill="grey90"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank(),
+  axis.title.x = element_text(size = 10)
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey90"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 2, dir = "v")+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1), expand = c(0,0))+
+  scale_y_discrete(expand = c(0,0))+
+  # make legend wider
+  theme(legend.key.width = unit(0.15, "in"),
+        legend.key.height = unit(0.1, "in")
+    )->RI_only_bins_heatmap_only15
+
+RI_only_bins_heatmap_only15->RI_only_bins_heatmap_only15_with_Legend
+
+# remove the legend
+RI_only_bins_heatmap_only15_with_Legend + theme(legend.position = "none") -> RI_only_bins_heatmap_only15
+
+# plot
+RI_only_bins_heatmap_only15
+
+# Save the plot
+ggsave("RI_only_bins_heatmap_only_chr15.png", RI_only_bins_heatmap_only15, width=4, height=1.35/1.5, dpi=600)
+ggsave("RI_only_bins_heatmap_only_chr15.svg", RI_only_bins_heatmap_only15, width=4, height=1.35/1.5, dpi=600)
+# Save the plot with legend
+ggsave("RI_only_bins_heatmap_only_chr15_with_legend.png", RI_only_bins_heatmap_only15_with_Legend, width=4, height=1.35, dpi=600)
+ggsave("RI_only_bins_heatmap_only_chr15_with_legend.svg", RI_only_bins_heatmap_only15_with_Legend, width=4, height=1.35, dpi=600)
+
+# Save Robject
+saveRDS(RI_only_bins_heatmap_only15, "Founder_only_bins_heatmap_only_chr15.rds")
+saveRDS(RI_only_bins_heatmap_only15_with_Legend, "Founder_only_bins_heatmap_only_chr15_with_Legend.rds")
+```
+
+```{r generate Founder only bins}
+# Summarize Founder-only genotype counts per bin
+Founder_only_bins <- Processed_Genotypes %>%
+  filter(Founder_Strain_Only > 0) %>%
+  group_by(CHROM, Bin) %>%
+  summarise(Number_of_Founder_Only_Loci = n(), .groups = "drop")
+
+# Add the last bin to the Founder_only_bins dataframe
+Founder_only_bins %>% bind_rows(last_bin_per_chrom) -> Founder_only_bins
+
+# Add an entry for each chromosome at the start of the chromosome to ensure full chromosome is plotted
+Founder_only_bins %>% group_by(CHROM) %>% summarise(Bin = 0) -> first_bin_per_chrom
+
+# Add the first bin to the Founder_only_bins dataframe
+Founder_only_bins %>% bind_rows(first_bin_per_chrom) -> Founder_only_bins
+
+# Ensure correct ordering of chromosomes for plotting
+Founder_only_bins$CHROM <- factor(Founder_only_bins$CHROM, levels = paste0("chr", c(1:19, "X", "Y")))
+
+# Filter to exclude the Y chromosome and chrM
+Founder_only_bins %>% filter(CHROM != "chrY" & CHROM != "chrM") -> Founder_only_bins
+```
+
+```{r build shuffles}
+generate_shuffle_indices <- function(df, chromosome_id, n_shuffles, seed) {
+  
+  if (!("CHROM" %in% colnames(df))) {
+    stop("Input data frame must contain a column named 'CHROM'.")
+  }
+  
+  if (!("originating_index" %in% colnames(df))) {
+    stop("Input data frame must contain a column named 'originating_index'.")
+  }
+  
+  if (!is.numeric(n_shuffles) || length(n_shuffles) != 1 || n_shuffles < 1) {
+    stop("n_shuffles must be a single integer >= 1.")
+  }
+  
+  if (!is.numeric(seed) || length(seed) != 1) {
+    stop("seed must be a single numeric value.")
+  }
+  
+  n_shuffles <- as.integer(n_shuffles)
+  
+  set.seed(seed)
+  
+  chr_indices <- df$originating_index[df$CHROM == chromosome_id]
+  
+  if (length(chr_indices) == 0) {
+    stop(paste("No rows found for chromosome:", chromosome_id))
+  }
+  
+  shuffle_mat <- replicate(
+    n = n_shuffles,
+    expr = sample(chr_indices, size = length(chr_indices), replace = FALSE)
+  )
+  
+  shuffle_df <- data.frame(
+    originating_index = chr_indices,
+    shuffle_mat,
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+  
+  colnames(shuffle_df) <- c(
+    "originating_index",
+    paste0("shuffle_", seq_len(n_shuffles))
+  )
+  
+  return(shuffle_df)
+}
+
+Processed_Genotypes$originating_index <- seq_len(nrow(Processed_Genotypes))
+
+lapply(
+  paste0("chr",c(1:19)),
+  function(CHR) generate_shuffle_indices(
+      df = Processed_Genotypes,
+      chromosome_id = CHR,
+      n_shuffles = 10,
+      seed = 12345
+    )
+  ) %>% bind_rows() -> shuffle_indices_df
+
+# I wanted to add the shuffled indices back to Processed_Genotypes using originating_index as the key. But this requires too much memory.
+# So I will have to work with shuffle_indices_df and Processed_Genotypes beign seperate objects
+```
+
+```{r generate null Founder only bins}
+# Define bin size (in base pairs)
+bin_size <- 1000000  # 1 Mb bins
+
+# Create a new column for bin assignment
+## This already exists from priorstep
+
+# Summarize Founder-only genotype counts per bin
+cbind(Processed_Genotypes[,c(1:2,20)],Processed_Genotypes[shuffle_indices_df[,2],16]) %>%
+  filter(Founder_Strain_Only > 0) %>%
+  group_by(CHROM, Bin) %>%
+  summarise(Number_of_Founder_Only_Loci = n(), .groups = "drop") -> Founder_only_bins_null__1
+
+cbind(Processed_Genotypes[,c(1:2,20)],Processed_Genotypes[shuffle_indices_df[,3],16]) %>%
+  filter(Founder_Strain_Only > 0) %>%
+  group_by(CHROM, Bin) %>%
+  summarise(Number_of_Founder_Only_Loci = n(), .groups = "drop") -> Founder_only_bins_null__2
+
+cbind(Processed_Genotypes[,c(1:2,20)],Processed_Genotypes[shuffle_indices_df[,4],16]) %>%
+  filter(Founder_Strain_Only > 0) %>%
+  group_by(CHROM, Bin) %>%
+  summarise(Number_of_Founder_Only_Loci = n(), .groups = "drop") -> Founder_only_bins_null__3
+
+cbind(Processed_Genotypes[,c(1:2,20)],Processed_Genotypes[shuffle_indices_df[,5],16]) %>%
+  filter(Founder_Strain_Only > 0) %>%
+  group_by(CHROM, Bin) %>%
+  summarise(Number_of_Founder_Only_Loci = n(), .groups = "drop") -> Founder_only_bins_null__4
+
+cbind(Processed_Genotypes[,c(1:2,20)],Processed_Genotypes[shuffle_indices_df[,6],16]) %>%
+  filter(Founder_Strain_Only > 0) %>%
+  group_by(CHROM, Bin) %>%
+  summarise(Number_of_Founder_Only_Loci = n(), .groups = "drop") -> Founder_only_bins_null__5
+
+cbind(Processed_Genotypes[,c(1:2,20)],Processed_Genotypes[shuffle_indices_df[,7],16]) %>%
+  filter(Founder_Strain_Only > 0) %>%
+  group_by(CHROM, Bin) %>%
+  summarise(Number_of_Founder_Only_Loci = n(), .groups = "drop") -> Founder_only_bins_null__6
+
+cbind(Processed_Genotypes[,c(1:2,20)],Processed_Genotypes[shuffle_indices_df[,8],16]) %>%
+  filter(Founder_Strain_Only > 0) %>%
+  group_by(CHROM, Bin) %>%
+  summarise(Number_of_Founder_Only_Loci = n(), .groups = "drop") -> Founder_only_bins_null__7
+
+cbind(Processed_Genotypes[,c(1:2,20)],Processed_Genotypes[shuffle_indices_df[,9],16]) %>%
+  filter(Founder_Strain_Only > 0) %>%
+  group_by(CHROM, Bin) %>%
+  summarise(Number_of_Founder_Only_Loci = n(), .groups = "drop") -> Founder_only_bins_null__8
+
+cbind(Processed_Genotypes[,c(1:2,20)],Processed_Genotypes[shuffle_indices_df[,10],16]) %>%
+  filter(Founder_Strain_Only > 0) %>%
+  group_by(CHROM, Bin) %>%
+  summarise(Number_of_Founder_Only_Loci = n(), .groups = "drop") -> Founder_only_bins_null__9
+
+cbind(Processed_Genotypes[,c(1:2,20)],Processed_Genotypes[shuffle_indices_df[,11],16]) %>%
+  filter(Founder_Strain_Only > 0) %>%
+  group_by(CHROM, Bin) %>%
+  summarise(Number_of_Founder_Only_Loci = n(), .groups = "drop") -> Founder_only_bins_null__10
+
+Founder_only_bins_null__1$iteration<-1
+Founder_only_bins_null__2$iteration<-2
+Founder_only_bins_null__3$iteration<-3
+Founder_only_bins_null__4$iteration<-4
+Founder_only_bins_null__5$iteration<-5
+Founder_only_bins_null__6$iteration<-6
+Founder_only_bins_null__7$iteration<-7
+Founder_only_bins_null__8$iteration<-8
+Founder_only_bins_null__9$iteration<-9
+Founder_only_bins_null__10$iteration<-10
+
+# merge the null Founder only bins into one dataframe
+Founder_only_bins_null <- bind_rows(Founder_only_bins_null__1, Founder_only_bins_null__2, Founder_only_bins_null__3, Founder_only_bins_null__4, Founder_only_bins_null__5, Founder_only_bins_null__6, Founder_only_bins_null__7, Founder_only_bins_null__8, Founder_only_bins_null__9, Founder_only_bins_null__10)
+
+ggplot(Founder_only_bins_null, aes(x=Number_of_Founder_Only_Loci))+
+  geom_histogram(binwidth=1, fill="#2d5879", color="black") +
+  geom_vline(xintercept = 1500, linetype = "dashed", color = "orange", linewidth = 0.5, alpha=1) +
+  ggtitle("Null distribution of Founder only bins")
+
+ggplot(Founder_only_bins, aes(x=Number_of_Founder_Only_Loci))+
+  geom_histogram(binwidth=1, fill="#2d5879", color="black") +
+  geom_vline(xintercept = 1500, linetype = "dashed", color = "orange", linewidth = 0.5, alpha=1) +
+  ggtitle("Observed distribution of Founder only bins")
+
+
+# build ecdf of null Founder only bins
+ecdf(Founder_only_bins_null$Number_of_Founder_Only_Loci) -> Founder_only_bins_null_ecdf
+
+# estimate pvalue of observed Founder only bins using the null ecdf
+Founder_only_bins$pvalue <- 1 - Founder_only_bins_null_ecdf(Founder_only_bins$Number_of_Founder_Only_Loci)
+
+# perform multiple testing correction using the Benjamini-Hochberg method
+Founder_only_bins$padj <- p.adjust(Founder_only_bins$pvalue, method = "BH")
+
+# Save the Founder only bins with pvalues and adjusted pvalues
+write.table(Founder_only_bins, "Founder_only_bins_with_pvalues.tsv", sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+```{r plot blocks of Founder only loci along the genome as points, fig.width=10, fig.height=5}
+ggplot(Founder_only_bins, aes(x=Bin/1e6, y=Number_of_Founder_Only_Loci, color=-log1p(padj)))+
+  geom_point(size=1, stroke=0) +
+  facet_wrap(~CHROM, scales="free_x") +
+  scale_color_viridis_c(option = "viridis", na.value = "grey70", begin=0, end=0.7) +
+  labs(title="Founder only loci along the genome", x="Genomic position (Mb)", y="# Founder only loci", color="-log1p(FDR)") +
+  theme(
+    panel.background = element_rect(fill="grey90"),
+    panel.grid.major=element_blank(), #adds major grid lines
+    panel.grid.minor=element_blank(), #adds minor grid lines
+    panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+    axis.line=element_blank(),
+    axis.title.x = element_text(size = 10),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  theme(legend.position = "bottom") +
+  geom_hline(yintercept = 1500, linetype = "dashed", color = "orange", linewidth = 0.5, alpha=1) -> Founder_only_bins_points
+
+# Save the plot as svg
+ggsave("Founder_only_bins_points.svg", Founder_only_bins_points, width=10, height=5, dpi=600)
+```
+
+```{r plot blocks of Founder only loci along chrom six, fig.width=4, fig.height=2.5}
+ggplot(subset(Founder_only_bins, CHROM=="chr6"), aes(x=Bin/1e6, y=Number_of_Founder_Only_Loci, color=-log1p(padj)))+
+  geom_point(size=1, stroke=0) +
+  facet_wrap(~CHROM, scales="free_x") +
+  labs(x="Genomic position (Mb)", y="Founder only\nloci", color="-log1p(FDR)") +
+  theme(
+    panel.background = element_rect(fill="grey90"),
+    panel.grid.major=element_blank(), #adds major grid lines
+    panel.grid.minor=element_blank(), #adds minor grid lines
+    panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+    axis.line=element_blank(),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  theme(legend.position = "bottom") +
+  scale_y_continuous(expand = c(0,0)) +
+  geom_hline(yintercept = 1500, linetype = "dashed", color = "orange", linewidth = 0.5, alpha=1) +
+  scale_color_viridis_c(option = "viridis", na.value = "grey70", begin=0, end=0.7)
+
+```
+
+```{r plot heatmap of Founder only bins}
+# Plot binned Founder-only loci along the genome as heatmap
+ggplot(Founder_only_bins, aes(x = Bin/1000000, y = CHROM, fill = Number_of_Founder_Only_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "turbo", na.value = "grey70", begin=0.3, end=0, trans="log10", labels=comma) +
+  labs(title = NULL, x = NULL, y = NULL, fill = "Number of Founder-only loci") +
+  theme(
+  panel.background = element_rect(fill="white"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines	
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank()
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey70"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 5)+
+  # Remove y axis labels
+  theme(axis.text.y = element_blank())+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1))+
+  # make legend wider
+  theme(legend.key.width = unit(1, "cm"))+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())->Founder_only_bins_heatmap
+
+# Save the plot
+ggsave("Founder_only_bins_heatmap.png", Founder_only_bins_heatmap, width=26, height=4.1, dpi=600)
+
+# Save Robject
+saveRDS(Founder_only_bins_heatmap, "Founder_only_bins_heatmap.rds")
+```
+
+```{r plot heatmap of Founder only bins v2 second}
+
+subset(Founder_only_bins, Number_of_Founder_Only_Loci>1500)$CHROM %>% unique() -> founder_only_chroms_over_1500
+
+ggplot(subset(Founder_only_bins, (Number_of_Founder_Only_Loci>1500 | is.na(Number_of_Founder_Only_Loci)) & CHROM %in% founder_only_chroms_over_1500 ), aes(x = Bin/1000000, y = CHROM, fill = Number_of_Founder_Only_Loci )) +
+  geom_tile() +
+  labs(title = NULL, x = "Position (Mb)", y = NULL, fill = "# Founder specific loci") +
+  theme(
+  panel.background = element_rect(fill="grey90"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank(),
+  axis.title.x = element_text(size = 10)
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey90"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 2, dir = "v")+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1), expand = c(0,0))+
+  scale_y_discrete(expand = c(0,0)) +
+  scale_fill_viridis_c(limits = c(1, max(Founder_only_bins$Number_of_Founder_Only_Loci, na.rm = TRUE)), option = "plasma", na.value = "grey90", begin=0, end=0.7, trans="log10", labels=comma) +
+  # make legend wider
+  theme(legend.key.width = unit(0.15, "in"),
+        legend.key.height = unit(0.1, "in")
+    )->Founder_only_bins_heatmap2
+
+Founder_only_bins_heatmap2
+
+# Save the plot
+ggsave("Founder_Only_bins_heatmap_v2.png", Founder_only_bins_heatmap2, width=3.98, height=5, dpi=600)
+
+# Save Robject
+saveRDS(Founder_only_bins_heatmap, "Founder_Only_bins_heatmap_v2.rds")
+```
+
+```{r plot heatmap of Founder only bins v2 second not NA}
+# filter out chromosomes with a total of 0 Number_of_Founder_Only_Loci
+## sum number of Founder_Only_Loci per chromosome
+Founder_only_bins %>% group_by(CHROM) %>% summarise(Total_Founder_Only_Loci = sum(Number_of_Founder_Only_Loci, na.rm = TRUE)) -> founder_only_count_per_chrom
+
+subset(founder_only_count_per_chrom, Total_Founder_Only_Loci>0)$CHROM -> founder_only_chroms
+
+
+ggplot(subset(Founder_only_bins, CHROM %in% founder_only_chroms), aes(x = Bin/1000000, y = CHROM, fill = Number_of_Founder_Only_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", na.value = "black", begin=0, end=0.7, labels=comma, limits = c(1, max(Founder_only_bins$Number_of_Founder_Only_Loci, na.rm = TRUE))) +
+  labs(title = NULL, x = "Position (Mb)", y = NULL, fill = "# Founder specific loci") +
+  theme(
+  panel.background = element_rect(fill="grey90"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank(),
+  axis.title.x = element_text(size = 10)
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey90"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 2, dir = "v")+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1), expand = c(0,0))+
+  scale_y_discrete(expand = c(0,0))+
+  # make legend wider
+  theme(legend.key.width = unit(0.15, "in"),
+        legend.key.height = unit(0.1, "in")
+    )->Founder_only_bins_heatmap_onlynonna_chroms
+
+Founder_only_bins_heatmap_onlynonna_chroms
+
+# Save the plot
+ggsave("Founder_only_bins_heatmap_onlynonna_chroms.png", Founder_only_bins_heatmap_onlynonna_chroms, width=11, height=3, dpi=600)
+
+# Save Robject
+saveRDS(Founder_only_bins_heatmap_onlynonna_chroms, "Founder_only_bins_heatmap_onlynonna_chroms.rds")
+
+```
+
+```{r plot heatmap of Founder only bins only chr1, include=TRUE, fig.width=4, fig.height=1.35/1.5}
+ggplot(subset(Founder_only_bins, CHROM=="chr1"), aes(x = Bin/1000000, y = CHROM, fill = Number_of_Founder_Only_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", na.value = "black", begin=0, end=0.7, labels=comma) +
+  labs(title = NULL, x = "Position (Mb)", y = NULL, fill = "# Founder specific loci") +
+  theme(
+  panel.background = element_rect(fill="grey90"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank(),
+  axis.title.x = element_text(size = 10)
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey90"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 2, dir = "v")+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1), expand = c(0,0))+
+  scale_y_discrete(expand = c(0,0))+
+  # make legend wider
+  theme(legend.key.width = unit(0.15, "in"),
+        legend.key.height = unit(0.1, "in")
+    )->Founder_only_bins_heatmap_only1
+
+Founder_only_bins_heatmap_only1->Founder_only_bins_heatmap_only1_with_Legend
+
+# remove the legend
+Founder_only_bins_heatmap_only1_with_Legend + theme(legend.position = "none") -> Founder_only_bins_heatmap_only1
+
+# plot
+Founder_only_bins_heatmap_only1
+
+# Save the plot
+ggsave("Founder_only_bins_heatmap_only_chr1.png", Founder_only_bins_heatmap_only1, width=4, height=1.35/1.5, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr1.svg", Founder_only_bins_heatmap_only1, width=4, height=1.35/1.5, dpi=600)
+# Save the plot with legend
+ggsave("Founder_only_bins_heatmap_only_chr1_with_legend.png", Founder_only_bins_heatmap_only1_with_Legend, width=4, height=1.35, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr1_with_legend.svg", Founder_only_bins_heatmap_only1_with_Legend, width=4, height=1.35, dpi=600)
+
+# Save Robject
+saveRDS(Founder_only_bins_heatmap_only1, "Founder_only_bins_heatmap_only_chr1.rds")
+saveRDS(Founder_only_bins_heatmap_only1_with_Legend, "Founder_only_bins_heatmap_only_chr1_with_Legend.rds")
+```
+
+```{r plot heatmap of Founder only bins only chr3, include=TRUE, fig.width=4, fig.height=1.35/1.5}
+ggplot(subset(Founder_only_bins, CHROM=="chr3"), aes(x = Bin/1000000, y = CHROM, fill = Number_of_Founder_Only_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", na.value = "black", begin=0, end=0.7, labels=comma) +
+  labs(title = NULL, x = "Position (Mb)", y = NULL, fill = "# Founder specific loci") +
+  theme(
+  panel.background = element_rect(fill="grey90"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank(),
+  axis.title.x = element_text(size = 10)
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey90"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 2, dir = "v")+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1), expand = c(0,0))+
+  scale_y_discrete(expand = c(0,0))+
+  # make legend wider
+  theme(legend.key.width = unit(0.15, "in"),
+        legend.key.height = unit(0.1, "in")
+    )->Founder_only_bins_heatmap_only3
+
+Founder_only_bins_heatmap_only3->Founder_only_bins_heatmap_only3_with_Legend
+
+# remove the legend
+Founder_only_bins_heatmap_only3_with_Legend + theme(legend.position = "none") -> Founder_only_bins_heatmap_only3
+
+# plot
+Founder_only_bins_heatmap_only3
+
+# Save the plot
+ggsave("Founder_only_bins_heatmap_only_chr3.png", Founder_only_bins_heatmap_only3, width=4, height=1.35/1.5, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr3.svg", Founder_only_bins_heatmap_only3, width=4, height=1.35/1.5, dpi=600)
+# Save the plot with legend
+ggsave("Founder_only_bins_heatmap_only_chr3_with_legend.png", Founder_only_bins_heatmap_only3_with_Legend, width=4, height=1.35, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr3_with_legend.svg", Founder_only_bins_heatmap_only3_with_Legend, width=4, height=1.35, dpi=600)
+
+# Save Robject
+saveRDS(Founder_only_bins_heatmap_only3, "Founder_only_bins_heatmap_only_chr3.rds")
+saveRDS(Founder_only_bins_heatmap_only3_with_Legend, "Founder_only_bins_heatmap_only_chr3_with_Legend.rds")
+```
+
+```{r plot heatmap of Founder only bins only chr4, include=TRUE, fig.width=4, fig.height=1.35/1.5}
+ggplot(subset(Founder_only_bins, CHROM=="chr4"), aes(x = Bin/1000000, y = CHROM, fill = Number_of_Founder_Only_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", na.value = "black", begin=0, end=0.7, labels=comma) +
+  labs(title = NULL, x = "Position (Mb)", y = NULL, fill = "# Founder specific loci") +
+  theme(
+  panel.background = element_rect(fill="grey90"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank(),
+  axis.title.x = element_text(size = 10)
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey90"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 2, dir = "v")+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1), expand = c(0,0))+
+  scale_y_discrete(expand = c(0,0))+
+  # make legend wider
+  theme(legend.key.width = unit(0.15, "in"),
+        legend.key.height = unit(0.1, "in")
+    )->Founder_only_bins_heatmap_only4
+
+Founder_only_bins_heatmap_only4->Founder_only_bins_heatmap_only4_with_Legend
+
+# remove the legend
+Founder_only_bins_heatmap_only4_with_Legend + theme(legend.position = "none") -> Founder_only_bins_heatmap_only4
+
+# plot
+Founder_only_bins_heatmap_only4
+
+# Save the plot
+ggsave("Founder_only_bins_heatmap_only_chr4.png", Founder_only_bins_heatmap_only4, width=4, height=1.35/1.5, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr4.svg", Founder_only_bins_heatmap_only4, width=4, height=1.35/1.5, dpi=600)
+# Save the plot with legend
+ggsave("Founder_only_bins_heatmap_only_chr4_with_legend.png", Founder_only_bins_heatmap_only4_with_Legend, width=4, height=1.35, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr4_with_legend.svg", Founder_only_bins_heatmap_only4_with_Legend, width=4, height=1.35, dpi=600)
+
+# Save Robject
+saveRDS(Founder_only_bins_heatmap_only4, "Founder_only_bins_heatmap_only_chr4.rds")
+saveRDS(Founder_only_bins_heatmap_only4_with_Legend, "Founder_only_bins_heatmap_only_chr4_with_Legend.rds")
+```
+
+```{r plot heatmap of Founder only bins only chr5, include=TRUE, fig.width=4, fig.height=1.35/1.5}
+ggplot(subset(Founder_only_bins, CHROM=="chr5"), aes(x = Bin/1000000, y = CHROM, fill = Number_of_Founder_Only_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", na.value = "black", begin=0, end=0.7, labels=comma) +
+  labs(title = NULL, x = "Position (Mb)", y = NULL, fill = "# Founder specific loci") +
+  theme(
+  panel.background = element_rect(fill="grey90"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank(),
+  axis.title.x = element_text(size = 10)
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey90"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 2, dir = "v")+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1), expand = c(0,0))+
+  scale_y_discrete(expand = c(0,0))+
+  # make legend wider
+  theme(legend.key.width = unit(0.15, "in"),
+        legend.key.height = unit(0.1, "in")
+    )->Founder_only_bins_heatmap_only5
+
+Founder_only_bins_heatmap_only5->Founder_only_bins_heatmap_only5_with_Legend
+
+# remove the legend
+Founder_only_bins_heatmap_only5_with_Legend + theme(legend.position = "none") -> Founder_only_bins_heatmap_only5
+
+# plot
+Founder_only_bins_heatmap_only5
+
+# Save the plot
+ggsave("Founder_only_bins_heatmap_only_chr5.png", Founder_only_bins_heatmap_only5, width=4, height=1.35/1.5, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr5.svg", Founder_only_bins_heatmap_only5, width=4, height=1.35/1.5, dpi=600)
+# Save the plot with legend
+ggsave("Founder_only_bins_heatmap_only_chr5_with_legend.png", Founder_only_bins_heatmap_only5_with_Legend, width=4, height=1.35, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr5_with_legend.svg", Founder_only_bins_heatmap_only5_with_Legend, width=4, height=1.35, dpi=600)
+
+# Save Robject
+saveRDS(Founder_only_bins_heatmap_only5, "Founder_only_bins_heatmap_only_chr5.rds")
+saveRDS(Founder_only_bins_heatmap_only5_with_Legend, "Founder_only_bins_heatmap_only_chr5_with_Legend.rds")
+```
+
+```{r plot heatmap of Founder only bins only chr6, include=TRUE, fig.width=4, fig.height=1.35/1.5}
+ggplot(subset(Founder_only_bins, CHROM=="chr6"), aes(x = Bin/1000000, y = CHROM, fill = Number_of_Founder_Only_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", na.value = "black", begin=0, end=0.7, labels=comma) +
+  labs(title = NULL, x = "Position (Mb)", y = NULL, fill = "# Founder specific loci") +
+  theme(
+  panel.background = element_rect(fill="grey90"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank(),
+  axis.title.x = element_text(size = 10)
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey90"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 2, dir = "v")+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1), expand = c(0,0))+
+  scale_y_discrete(expand = c(0,0))+
+  # make legend wider
+  theme(legend.key.width = unit(0.15, "in"),
+        legend.key.height = unit(0.1, "in")
+    )->Founder_only_bins_heatmap_only6
+
+Founder_only_bins_heatmap_only6->Founder_only_bins_heatmap_only6_with_Legend
+
+# remove the legend
+Founder_only_bins_heatmap_only6_with_Legend + theme(legend.position = "none") -> Founder_only_bins_heatmap_only6
+
+# plot
+Founder_only_bins_heatmap_only6
+
+# Save the plot
+ggsave("Founder_only_bins_heatmap_only_chr6.png", Founder_only_bins_heatmap_only6, width=4, height=1.35/1.5, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr6.svg", Founder_only_bins_heatmap_only6, width=4, height=1.35/1.5, dpi=600)
+# Save the plot with legend
+ggsave("Founder_only_bins_heatmap_only_chr6_with_legend.png", Founder_only_bins_heatmap_only6_with_Legend, width=4, height=1.35, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr6_with_legend.svg", Founder_only_bins_heatmap_only6_with_Legend, width=4, height=1.35, dpi=600)
+
+# Save Robject
+saveRDS(Founder_only_bins_heatmap_only6, "Founder_only_bins_heatmap_only_chr6.rds")
+saveRDS(Founder_only_bins_heatmap_only6_with_Legend, "Founder_only_bins_heatmap_only_chr6_with_Legend.rds")
+```
+
+```{r plot heatmap of Founder only bins only chr7, include=TRUE, fig.width=4, fig.height=1.35/1.5}
+ggplot(subset(Founder_only_bins, CHROM=="chr7"), aes(x = Bin/1000000, y = CHROM, fill = Number_of_Founder_Only_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", na.value = "black", begin=0, end=0.7, labels=comma) +
+  labs(title = NULL, x = "Position (Mb)", y = NULL, fill = "# Founder specific loci") +
+  theme(
+  panel.background = element_rect(fill="grey90"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank(),
+  axis.title.x = element_text(size = 10)
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey90"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 2, dir = "v")+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1), expand = c(0,0))+
+  scale_y_discrete(expand = c(0,0))+
+  # make legend wider
+  theme(legend.key.width = unit(0.15, "in"),
+        legend.key.height = unit(0.1, "in")
+    )->Founder_only_bins_heatmap_only7
+
+Founder_only_bins_heatmap_only7->Founder_only_bins_heatmap_only7_with_Legend
+
+# remove the legend
+Founder_only_bins_heatmap_only7_with_Legend + theme(legend.position = "none") -> Founder_only_bins_heatmap_only7
+
+# plot
+Founder_only_bins_heatmap_only7
+
+# Save the plot
+ggsave("Founder_only_bins_heatmap_only_chr7.png", Founder_only_bins_heatmap_only7, width=4, height=1.35/1.5, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr7.svg", Founder_only_bins_heatmap_only7, width=4, height=1.35/1.5, dpi=600)
+# Save the plot with legend
+ggsave("Founder_only_bins_heatmap_only_chr7_with_legend.png", Founder_only_bins_heatmap_only7_with_Legend, width=4, height=1.35, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr7_with_legend.svg", Founder_only_bins_heatmap_only7_with_Legend, width=4, height=1.35, dpi=600)
+
+# Save Robject
+saveRDS(Founder_only_bins_heatmap_only7, "Founder_only_bins_heatmap_only_chr7.rds")
+saveRDS(Founder_only_bins_heatmap_only7_with_Legend, "Founder_only_bins_heatmap_only_chr7_with_Legend.rds")
+```
+
+```{r plot heatmap of Founder only bins only chr8, include=TRUE, fig.width=4, fig.height=1.35/1.5}
+ggplot(subset(Founder_only_bins, CHROM=="chr8"), aes(x = Bin/1000000, y = CHROM, fill = Number_of_Founder_Only_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", na.value = "black", begin=0, end=0.7, labels=comma) +
+  labs(title = NULL, x = "Position (Mb)", y = NULL, fill = "# Founder specific loci") +
+  theme(
+  panel.background = element_rect(fill="grey90"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank(),
+  axis.title.x = element_text(size = 10)
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey90"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 2, dir = "v")+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1), expand = c(0,0))+
+  scale_y_discrete(expand = c(0,0))+
+  # make legend wider
+  theme(legend.key.width = unit(0.15, "in"),
+        legend.key.height = unit(0.1, "in")
+    )->Founder_only_bins_heatmap_only8
+
+Founder_only_bins_heatmap_only8->Founder_only_bins_heatmap_only8_with_Legend
+
+# remove the legend
+Founder_only_bins_heatmap_only8_with_Legend + theme(legend.position = "none") -> Founder_only_bins_heatmap_only8
+
+# plot
+Founder_only_bins_heatmap_only8
+
+# Save the plot
+ggsave("Founder_only_bins_heatmap_only_chr8.png", Founder_only_bins_heatmap_only8, width=4, height=1.35/1.5, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr8.svg", Founder_only_bins_heatmap_only8, width=4, height=1.35/1.5, dpi=600)
+# Save the plot with legend
+ggsave("Founder_only_bins_heatmap_only_chr8_with_legend.png", Founder_only_bins_heatmap_only8_with_Legend, width=4, height=1.35, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr8_with_legend.svg", Founder_only_bins_heatmap_only8_with_Legend, width=4, height=1.35, dpi=600)
+
+# Save Robject
+saveRDS(Founder_only_bins_heatmap_only8, "Founder_only_bins_heatmap_only_chr8.rds")
+saveRDS(Founder_only_bins_heatmap_only8_with_Legend, "Founder_only_bins_heatmap_only_chr8_with_Legend.rds")
+```
+
+```{r plot heatmap of Founder only bins only chr11, include=TRUE, fig.width=4, fig.height=1.35/1.5}
+ggplot(subset(Founder_only_bins, CHROM=="chr11"), aes(x = Bin/1000000, y = CHROM, fill = Number_of_Founder_Only_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", na.value = "black", begin=0, end=0.7, labels=comma) +
+  labs(title = NULL, x = "Position (Mb)", y = NULL, fill = "# Founder specific loci") +
+  theme(
+  panel.background = element_rect(fill="grey90"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank(),
+  axis.title.x = element_text(size = 10)
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey90"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 2, dir = "v")+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1), expand = c(0,0))+
+  scale_y_discrete(expand = c(0,0))+
+  # make legend wider
+  theme(legend.key.width = unit(0.15, "in"),
+        legend.key.height = unit(0.1, "in")
+    )->Founder_only_bins_heatmap_only11
+
+Founder_only_bins_heatmap_only11->Founder_only_bins_heatmap_only11_with_Legend
+
+# remove the legend
+Founder_only_bins_heatmap_only11_with_Legend + theme(legend.position = "none") -> Founder_only_bins_heatmap_only11
+
+# plot
+Founder_only_bins_heatmap_only11
+
+# Save the plot
+ggsave("Founder_only_bins_heatmap_only_chr11.png", Founder_only_bins_heatmap_only11, width=4, height=1.35/1.5, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr11.svg", Founder_only_bins_heatmap_only11, width=4, height=1.35/1.5, dpi=600)
+# Save the plot with legend
+ggsave("Founder_only_bins_heatmap_only_chr11_with_legend.png", Founder_only_bins_heatmap_only11_with_Legend, width=4, height=1.35, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr11_with_legend.svg", Founder_only_bins_heatmap_only11_with_Legend, width=4, height=1.35, dpi=600)
+
+# Save Robject
+saveRDS(Founder_only_bins_heatmap_only11, "Founder_only_bins_heatmap_only_chr11.rds")
+saveRDS(Founder_only_bins_heatmap_only11_with_Legend, "Founder_only_bins_heatmap_only_chr11_with_Legend.rds")
+```
+
+```{r plot heatmap of Founder only bins only chr12, include=TRUE, fig.width=4, fig.height=1.35/1.5}
+ggplot(subset(Founder_only_bins, CHROM=="chr12"), aes(x = Bin/1000000, y = CHROM, fill = Number_of_Founder_Only_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", na.value = "black", begin=0, end=0.7, labels=comma) +
+  labs(title = NULL, x = "Position (Mb)", y = NULL, fill = "# Founder specific loci") +
+  theme(
+  panel.background = element_rect(fill="grey90"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank(),
+  axis.title.x = element_text(size = 10)
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey90"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 2, dir = "v")+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1), expand = c(0,0))+
+  scale_y_discrete(expand = c(0,0))+
+  # make legend wider
+  theme(legend.key.width = unit(0.15, "in"),
+        legend.key.height = unit(0.1, "in")
+    )->Founder_only_bins_heatmap_only12
+
+Founder_only_bins_heatmap_only12->Founder_only_bins_heatmap_only12_with_Legend
+
+# remove the legend
+Founder_only_bins_heatmap_only12_with_Legend + theme(legend.position = "none") -> Founder_only_bins_heatmap_only12
+
+# plot
+Founder_only_bins_heatmap_only12
+
+# Save the plot
+ggsave("Founder_only_bins_heatmap_only_chr12.png", Founder_only_bins_heatmap_only12, width=4, height=1.35/1.5, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr12.svg", Founder_only_bins_heatmap_only12, width=4, height=1.35/1.5, dpi=600)
+# Save the plot with legend
+ggsave("Founder_only_bins_heatmap_only_chr12_with_legend.png", Founder_only_bins_heatmap_only12_with_Legend, width=4, height=1.35, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr12_with_legend.svg", Founder_only_bins_heatmap_only12_with_Legend, width=4, height=1.35, dpi=600)
+
+# Save Robject
+saveRDS(Founder_only_bins_heatmap_only12, "Founder_only_bins_heatmap_only_chr12.rds")
+saveRDS(Founder_only_bins_heatmap_only12_with_Legend, "Founder_only_bins_heatmap_only_chr12_with_Legend.rds")
+```
+
+```{r plot heatmap of Founder only bins only chr14, include=TRUE, fig.width=4, fig.height=1.35/1.5}
+ggplot(subset(Founder_only_bins, CHROM=="chr14"), aes(x = Bin/1000000, y = CHROM, fill = Number_of_Founder_Only_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", na.value = "black", begin=0, end=0.7, labels=comma) +
+  labs(title = NULL, x = "Position (Mb)", y = NULL, fill = "# Founder specific loci") +
+  theme(
+  panel.background = element_rect(fill="grey90"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank(),
+  axis.title.x = element_text(size = 10)
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey90"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 2, dir = "v")+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1), expand = c(0,0))+
+  scale_y_discrete(expand = c(0,0))+
+  # make legend wider
+  theme(legend.key.width = unit(0.15, "in"),
+        legend.key.height = unit(0.1, "in")
+    )->Founder_only_bins_heatmap_only14
+
+Founder_only_bins_heatmap_only14->Founder_only_bins_heatmap_only14_with_Legend
+
+# remove the legend
+Founder_only_bins_heatmap_only14_with_Legend + theme(legend.position = "none") -> Founder_only_bins_heatmap_only14
+
+# plot
+Founder_only_bins_heatmap_only14
+
+# Save the plot
+ggsave("Founder_only_bins_heatmap_only_chr14.png", Founder_only_bins_heatmap_only14, width=4, height=1.35/1.5, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr14.svg", Founder_only_bins_heatmap_only14, width=4, height=1.35/1.5, dpi=600)
+# Save the plot with legend
+ggsave("Founder_only_bins_heatmap_only_chr14_with_legend.png", Founder_only_bins_heatmap_only14_with_Legend, width=4, height=1.35, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr14_with_legend.svg", Founder_only_bins_heatmap_only14_with_Legend, width=4, height=1.35, dpi=600)
+
+# Save Robject
+saveRDS(Founder_only_bins_heatmap_only14, "Founder_only_bins_heatmap_only_chr14.rds")
+saveRDS(Founder_only_bins_heatmap_only14_with_Legend, "Founder_only_bins_heatmap_only_chr14_with_Legend.rds")
+```
+
+```{r plot heatmap of Founder only bins only chr19, include=TRUE, fig.width=4, fig.height=1.35/1.5}
+ggplot(subset(Founder_only_bins, CHROM=="chr19"), aes(x = Bin/1000000, y = CHROM, fill = Number_of_Founder_Only_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", na.value = "black", begin=0, end=0.7, labels=comma) +
+  labs(title = NULL, x = "Position (Mb)", y = NULL, fill = "# Founder specific loci") +
+  theme(
+  panel.background = element_rect(fill="grey90"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank(),
+  axis.title.x = element_text(size = 10)
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey90"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 2, dir = "v")+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1), expand = c(0,0))+
+  scale_y_discrete(expand = c(0,0))+
+  # make legend wider
+  theme(legend.key.width = unit(0.15, "in"),
+        legend.key.height = unit(0.1, "in")
+    )->Founder_only_bins_heatmap_only19
+
+Founder_only_bins_heatmap_only19->Founder_only_bins_heatmap_only19_with_Legend
+
+# remove the legend
+Founder_only_bins_heatmap_only19_with_Legend + theme(legend.position = "none") -> Founder_only_bins_heatmap_only19
+
+# plot
+Founder_only_bins_heatmap_only19
+
+# Save the plot
+ggsave("Founder_only_bins_heatmap_only_chr19.png", Founder_only_bins_heatmap_only19, width=4, height=1.35/1.5, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr19.svg", Founder_only_bins_heatmap_only19, width=4, height=1.35/1.5, dpi=600)
+# Save the plot with legend
+ggsave("Founder_only_bins_heatmap_only_chr19_with_legend.png", Founder_only_bins_heatmap_only19_with_Legend, width=4, height=1.35, dpi=600)
+ggsave("Founder_only_bins_heatmap_only_chr19_with_legend.svg", Founder_only_bins_heatmap_only19_with_Legend, width=4, height=1.35, dpi=600)
+
+# Save Robject
+saveRDS(Founder_only_bins_heatmap_only19, "Founder_only_bins_heatmap_only_chr19.rds")
+saveRDS(Founder_only_bins_heatmap_only19_with_Legend, "Founder_only_bins_heatmap_only_chr19_with_Legend.rds")
+```
+
+```{r generate missingness statistics for founders, include=TRUE}
+# For each locus, calculate the fraction of founders that have missing genotype
+## Split the Founder_Count and keep the first element, which is the fraction of missing data
+sapply(strsplit(Processed_Genotypes_Missing$Founder_Count, ","), function(x) x[1]) -> Processed_Genotypes_Missing$MissingFounderCount
+
+## Convert to numeric
+Processed_Genotypes_Missing$MissingFounderCount<-as.numeric(Processed_Genotypes_Missing$MissingFounderCount)
+
+## Plot histogram of missing data fraction for founders
+ggplot(Processed_Genotypes_Missing, aes(x=MissingFounderCount))+
+  geom_histogram(binwidth=1, fill="#f04857", color="black")+
+  labs(title="Histogram of missing data for founders", x="Count of founders missing genotype", y="Number of loci")+
+  CS.THEME+
+  # make x axis ticks 0,1,2,3,4,5,7
+  scale_x_continuous(breaks=c(0,1,2,3,4,5,6,7))+
+  # make y axis labels with commas in thousands
+  scale_y_continuous(labels=comma)
+  # fill space below the bars
+```
+
+```{r generate missingness statistics for founders by chromosome, include=TRUE, fig.width=12, fig.height=8}
+## Order chromosomes as factors chr1, chr2, chr3, ..., chr19
+Processed_Genotypes_Missing$CHROM<-factor(Processed_Genotypes_Missing$CHROM, levels=paste0("chr", c(1:19)))
+
+## Plot by chromosome
+ggplot(Processed_Genotypes_Missing, aes(x=MissingFounderCount))+
+  geom_histogram(binwidth=1, fill="#f04857", color="black")+
+  labs(title="Histogram of missing data for founders by chromosome", x="Count of founders missing genotype", y="Number of loci")+
+  CS.THEME+
+  # make x axis ticks 0,1,2,3,4,5,7
+  scale_x_continuous(breaks=c(0,1,2,3,4,5,6,7))+
+  # make y axis labels with commas in thousands
+  scale_y_continuous(labels=comma)+
+  facet_wrap(~CHROM, scales="free")+
+  theme(legend.position="none")
+```
+
+```{r generate missingness statistics for RI, include=TRUE}
+# For each locus, calculate the fraction of RI that have missing genotype
+## Split the RI_Count and keep the first element, which is the fraction of missing data
+sapply(strsplit(Processed_Genotypes_Missing$RI_Count, ","), function(x) x[1]) -> Processed_Genotypes_Missing$MissingRICount
+
+## Convert to numeric
+Processed_Genotypes_Missing$MissingRICount<-as.numeric(Processed_Genotypes_Missing$MissingRICount)
+
+## Plot histogram of missing data fraction for RI
+ggplot(Processed_Genotypes_Missing, aes(x=MissingRICount))+
+  geom_histogram(binwidth=1, fill="#f04857", color="black")+
+  labs(title="Histogram of missing data for RI", x="Count of RI missing genotype", y="Number of loci")+
+  CS.THEME+
+  # make x axis ticks 0,1-75
+  scale_x_continuous(breaks=seq(0,75,5))+
+  # make y axis labels with commas in thousands
+  scale_y_continuous(labels=comma)
+```
+
+```{r generate missingness statistics for RI by chromosome, include=TRUE, fig.width=24, fig.height=8}
+## Plot by chromosome
+ggplot(Processed_Genotypes_Missing, aes(x=MissingRICount))+
+  geom_histogram(binwidth=1, fill="#f04857", color="black")+
+  labs(title="Histogram of missing data for RI by chromosome", x="Count of RI missing genotype", y="Number of loci")+
+  CS.THEME+
+  # make x axis ticks 0,1-75
+  scale_x_continuous(breaks=seq(0,75,5))+
+  # make y axis labels with commas in thousands
+  scale_y_continuous(labels=comma)+
+  facet_wrap(~CHROM, scales="free")+
+  theme(legend.position="none")
+```
+
+```{r proces missing data loci for stacked barpot, include=TRUE}
+nrow(Processed_Genotypes) -> NumberTotalLoci
+# Total number of loci per chromosome
+Processed_Genotypes %>% group_by(CHROM) %>% summarise(Numberloci=n()) -> lociPerChromosome
+
+# Total number of missing loci per chromosome
+Processed_Genotypes_Missing %>% group_by(CHROM) %>% summarise(NumberMissing=n()) -> MissingPerChromosome
+
+# Total number of loci agnostic of population
+nrow(subset(Processed_Genotypes_Missing, MissingFounderCount>0 | MissingRICount>0))
+
+# Percentage of missing data agnostic of population
+100*nrow(subset(Processed_Genotypes_Missing, MissingFounderCount>0 | MissingRICount>0))/NumberTotalLoci
+NumberTotalLoci
+
+# Total missing from founders
+subset(Processed_Genotypes_Missing, MissingFounderCount>0) %>% group_by(CHROM) %>% summarise(NumberMissingFounder=n()) -> MissingFounderPerChromosome
+
+# Total missing from RI
+subset(Processed_Genotypes_Missing, MissingRICount>0) %>% group_by(CHROM) %>% summarise(NumberMissingRI=n()) -> MissingRIPerChromosome
+
+# merge the dataframes
+lociPerChromosome<-merge(lociPerChromosome, MissingFounderPerChromosome, by="CHROM", all.x=TRUE)
+lociPerChromosome<-merge(lociPerChromosome, MissingRIPerChromosome, by="CHROM", all.x=TRUE)
+
+# Calculate percentage of missing data for founders and RI
+lociPerChromosome$PercentageMissingFounder<-lociPerChromosome$NumberMissingFounder/lociPerChromosome$Numberloci*100
+lociPerChromosome$PercentageMissingRI<-lociPerChromosome$NumberMissingRI/lociPerChromosome$Numberloci*100
+
+# make wide to long
+gather(lociPerChromosome[,c(1,3,5)], key="Type", value="Number", NumberMissingFounder:PercentageMissingFounder) -> lociPerChromosome_Long_founder
+gather(lociPerChromosome[,c(1,4,6)], key="Type", value="Number", NumberMissingRI:PercentageMissingRI) -> lociPerChromosome_Long_RI
+
+# bind the two dataframes
+bind_rows(lociPerChromosome_Long_founder, lociPerChromosome_Long_RI) -> lociPerChromosome_Long
+
+# Add Population column
+lociPerChromosome_Long$Population<-c(rep("Founder", nrow(lociPerChromosome_Long_founder)), rep("RI", nrow(lociPerChromosome_Long_RI)))
+
+# Rename the Type column to "Number of loci" and "Percentage missing"
+## replace "PercentageMissingFounder" with "Percentage_missing" and "PercentageMissingRI" with "Percentage_missing"
+lociPerChromosome_Long$Type<-gsub("PercentageMissingFounder", "Percentage_missing", lociPerChromosome_Long$Type)
+lociPerChromosome_Long$Type<-gsub("PercentageMissingRI", "Percentage_missing", lociPerChromosome_Long$Type)
+## replace "NumberMissingFounder" with "Number_missing" and "NumberMissingRI" with "Number_missing"
+lociPerChromosome_Long$Type<-gsub("NumberMissingFounder", "Number_missing", lociPerChromosome_Long$Type)
+lociPerChromosome_Long$Type<-gsub("NumberMissingRI", "Number_missing", lociPerChromosome_Long$Type)
+
+# make long to wide splitting by Type
+spread(lociPerChromosome_Long, key="Type", value="Number") -> lociPerChromosome_Long
+
+# Order chromosomes as factors chr1, chr2, chr3, ..., chrX
+lociPerChromosome_Long$CHROM<-factor(lociPerChromosome_Long$CHROM, levels=paste0("chr", c(1:19, "X", "Y")))
+lociPerChromosome_Long$Population<-factor(lociPerChromosome_Long$Population, levels=c("Founder", "RI"))
+```
+
+```{r plot missing data loci for stacked barplot, include=TRUE, fig.width=8, fig.height=3}
+# Plot as stacked bar plot
+ggplot(lociPerChromosome_Long, aes(x=CHROM, y=Number_missing/1000000, fill=Population))+
+  geom_bar(stat="identity", position = "dodge")+
+  scale_fill_manual(values=c("#f04857", "#2d5879"))+
+  theme(axis.text.x=element_text(angle=45, hjust=1))+
+  labs(title="Number of loci missing\nper chromosome per population", x="Chromosome", y="Number of loci (M)", fill="")+
+  JFMVTheme+
+  # make y axis labels with commas in thousands
+  scale_y_continuous(labels=comma, expand=c(0,0), limits=c(0, max(lociPerChromosome_Long$Number/1000000, na.rm = TRUE)*1.2))+
+  theme(legend.position="bottom")
+```
+
+```{r prepare data for stacked barplot, include=TRUE}
+# Sum lociPerChromosome_Long acros CHROM for {Number_missing}
+lociPerChromosome_Long %>% group_by(Population) %>% summarise(Number_missing=sum(Number_missing,na.rm = TRUE), Percentage_missing=100*sum(Number_missing,na.rm = TRUE)/NumberTotalLoci) -> lociPerChromosome_Long_total
+
+# Add Missingness group
+lociPerChromosome_Long_total$Group<-"<1"
+
+# Rename "Number_missing" column to "Number_of_loci"
+colnames(lociPerChromosome_Long_total)[2]<-"Number_of_loci"
+
+# Rename "Founder" to "FL"
+lociPerChromosome_Long_total$Population<-gsub("Founder", "FL", lociPerChromosome_Long_total$Population)
+
+# add rows for non-missing loci
+bind_rows(
+  lociPerChromosome_Long_total,
+  data.frame(Population="FL", Number_of_loci=NumberTotalLoci-lociPerChromosome_Long_total$Number_of_loci[1], Percentage_missing=100-lociPerChromosome_Long_total$Percentage_missing[1], Group="1"),
+  data.frame(Population="RI", Number_of_loci=NumberTotalLoci-lociPerChromosome_Long_total$Number_of_loci[2], Percentage_missing=100-lociPerChromosome_Long_total$Percentage_missing[2], Group="1")
+) -> lociPerChromosome_Long_total
+
+# Plot as stacked bar plot
+# Add label
+lociPerChromosome_Long_total$Percentage_missing <- paste0(round(lociPerChromosome_Long_total$Percentage_missing, 2), "%")
+
+# order categories
+lociPerChromosome_Long_total$Group <- factor(lociPerChromosome_Long_total$Group, levels = c("<1", "1"), ordered = TRUE)
+
+# print table
+print(lociPerChromosome_Long_total)
+```
+
+```{r plot genome wide missing data loci for stacked barplot, include=TRUE, fig.width=2.7, fig.height=1.4}
+# 2.4 x 1.07
+# 3.5 x 1.560417
+
+# Plot stacked barplot of Both_Fraction composition
+ggplot(lociPerChromosome_Long_total, aes(y = Population, x = Number_of_loci/1000000, fill = Group)) +
+  geom_bar(stat = "identity", position = position_stack(reverse = TRUE), alpha=0.75) + 
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0)) +
+  ylab(NULL) +
+  xlab("Number of loci (M)") +
+  JFMVTheme +
+  scale_fill_viridis_d(option = "cividis", end = 0.2, begin = 0.8) + 
+  labs(title = NULL, fill = "Fraction of\nalleles missing") +
+  theme(legend.title = element_text(face = "bold", size = 8),
+        legend.text = element_text(face = "bold", size = 8),
+        legend.position = "bottom",
+        #legend.key.size = unit(0.5, "cm"),
+        axis.text.y = element_text(size = 8),
+        axis.title.y = element_text(size = 9.6),
+        title = element_text(size = 13),
+        axis.line.x.top    = element_blank(),
+        axis.ticks.x.top   = element_blank(),
+        axis.text.x.top    = element_blank(),
+        axis.title.x.top   = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank()
+      )+
+  geom_text(
+  aes(label = Percentage_missing),
+  position = position_stack(vjust = 0.5, reverse = TRUE),  # keep stacked
+  color = "black",
+  size = 13,
+  size.unit = "pt",
+  fontface = "bold"
+)+
+scale_x_break(
+    c(2, 10),      # The gap range to remove
+    space = 0.25,    # Visual space of the "break" in the plot
+    scales = "free",
+    expand = FALSE
+)->Missingness_Fraction_Composition
+
+#get_legend(Missingness_Fraction_Composition)->legend_Missingness_Fraction_Composition
+
+Missingness_Fraction_Composition<-Missingness_Fraction_Composition+theme(legend.position="none")
+
+Missingness_Fraction_Composition
+
+# Save the plot
+ggsave("Missingness_Fraction_Composition.png", Missingness_Fraction_Composition, width=2.7, height=1.4, dpi=300)
+
+# Save svg
+ggsave("Missingness_Fraction_Composition.svg", Missingness_Fraction_Composition, width=2.7, height=1.4)
+```
+
+```{r plot genome wide missing data loci for stacked barplot log10, include=TRUE, fig.width=2.7, fig.height=1.4}
+ggplot(lociPerChromosome_Long_total, aes(y = Population, x = Number_of_loci/1000000, fill = Group)) +
+  geom_bar(stat = "identity", position = position_stack(reverse = TRUE), alpha=0.75) + 
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0)) +
+  ylab(NULL) +
+  xlab("Number of loci (M)") +
+  JFMVTheme +
+  scale_fill_viridis_d(option = "cividis", end = 0.2, begin = 0.8) + 
+  labs(title = NULL, fill = "Fraction of\nalleles missing") +
+  theme(legend.title = element_text(face = "bold", size = 8),
+        legend.text = element_text(face = "bold", size = 8),
+        legend.position = "none",
+        axis.text.y = element_text(size = 8),
+        axis.title.y = element_text(size = 9.6),
+        title = element_text(size = 13),
+        axis.line.x.top    = element_blank(),
+        axis.ticks.x.top   = element_blank(),
+        axis.text.x.top    = element_blank(),
+        axis.title.x.top   = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank()
+      )+
+  geom_text(
+  aes(label = Percentage_missing),
+  position = position_stack(vjust = 0.5, reverse = TRUE),  # keep stacked
+  color = "black",
+  size = 13,
+  size.unit = "pt",
+  fontface = "bold")->Missingness_Fraction_Composition_Not_break
+
+# save as svg
+ggsave("Missingness_Fraction_Composition_Not_break.svg", Missingness_Fraction_Composition_Not_break, width=2.4, height=1.07)
+```
+
+```{r plot founder missingness by genomic postion split by chromosome}
+# Convert POS to numeric
+Processed_Genotypes_Missing$POS<-as.numeric(Processed_Genotypes_Missing$POS)
+
+# Plot founder missingness by genomic position split by chromosome
+Founder_positional_missingness_plot<-ggplot(Processed_Genotypes_Missing, aes(x=POS/1000000, y=MissingFounderCount))+
+  geom_jitter(size=0.05, stroke=0, height=0.2)+
+  labs(title="Founder missingness by genomic position split by chromosome", x="Genomic position", y="Count of founders missing genotype")+
+  CS.THEME+
+  theme(legend.position="bottom")+
+  facet_wrap(~CHROM, scales="free_x")
+
+# Save the plot
+ggsave("Founder_positional_missingness_plot.png", Founder_positional_missingness_plot, width=10, height=10, dpi=300)
+```
+
+```{r generate Founder missingness bins}
+# Define bin size (in base pairs)
+bin_size <- 1000000  # 1 Mb bins
+
+# Create a new column for bin assignment
+Processed_Genotypes_Missing$Bin <- floor(Processed_Genotypes_Missing$POS / bin_size) * bin_size
+
+# Summarize Founder missing genotype counts per bin
+Founder_missing_bins <- Processed_Genotypes_Missing %>%
+  group_by(CHROM, Bin) %>%
+  summarise(Number_of_Founder_Missing_Loci = sum(MissingFounderCount), .groups = "drop")
+
+# Remove sex chromosomes and chrM for plotting
+Founder_missing_bins <- Founder_missing_bins %>% filter(CHROM != "chrY" & CHROM != "chrX" & CHROM != "chrM")
+
+# Ensure correct ordering of chromosomes for plotting
+Founder_missing_bins$CHROM <- factor(Founder_missing_bins$CHROM, levels = paste0("chr", c(1:19)))
+
+# Import chromosome lengths to make sure to plot full chromosomes
+chrom_lengths <- read.delim(file.path(COLCROSS_ROOT, "assembly_lengths_for_75_RI_and_founders/all_strains_chromosome_lengths.tsv"), header = FALSE, sep = "\t")
+
+# Remove sex chromosomes and chrM from chrom_lengths
+chrom_lengths <- chrom_lengths %>% filter(V2 != "chrY" & V2 != "chrX" & V2 != "chrM")
+
+# Filter to only include the GRCm39 assembly
+chrom_lengths<-subset(chrom_lengths, V1=="GRCm39.renamed.filtered.fa")
+
+# For each chromosome, add a row with the last bin to ensure full chromosome is plotted. Where the last bin is the chromosome length
+chrom_lengths %>% mutate(Bin = V3 - V3 %% bin_size) -> last_bin_per_chrom
+
+# rename columns
+colnames(last_bin_per_chrom)[2]<-"CHROM"
+colnames(last_bin_per_chrom)[3]<-"Chromosome_Length"
+
+# Add the last bin to the Founder_missing_bins dataframe
+Founder_missing_bins %>% bind_rows(last_bin_per_chrom) -> Founder_missing_bins
+
+# Add an entry for each chromosome at the start of the chromosome to ensure full chromosome is plotted
+Founder_missing_bins %>% group_by(CHROM) %>% summarise(Bin = 0) -> first_bin_per_chrom
+
+# Add the first bin to the Founder_missing_bins dataframe
+Founder_missing_bins %>% bind_rows(first_bin_per_chrom) -> Founder_missing_bins
+
+# Make CHROM a factor sorted by chromosome number
+Founder_missing_bins$CHROM <- factor(Founder_missing_bins$CHROM, levels = paste0("chr", c(1:19)))
+
+# Replace NA values in Number_of_Founder_Missing_Loci with 0
+Founder_missing_bins$Number_of_Founder_Missing_Loci[is.na(Founder_missing_bins$Number_of_Founder_Missing_Loci)] <- 0
+
+```
+
+```{r plot heatmap of Founder missingness bins}
+# Plot binned Founder missing loci along the genome as heatmap
+ggplot(Founder_missing_bins, aes(x = 1+Bin/1000000, y = CHROM, fill = Number_of_Founder_Missing_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", na.value = "black", begin=0, end=0.7, trans="log10", labels=comma) +
+  labs(title = NULL, x = "Position (Mb)", y = NULL, fill = "# Founder missing loci") +
+  theme(
+  panel.background = element_rect(fill="grey90"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank(),
+  axis.title.x = element_text(size = 10)
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey90"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 2, dir = "v")+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.text.y = element_text(size = 8),
+    axis.text.x = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 10),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1), expand = c(0,0))+
+  scale_y_discrete(expand = c(0,0))+
+  # make legend wider
+  theme(legend.key.width = unit(0.15, "in"),
+        legend.key.height = unit(0.1, "in")
+    )->Founder_missing_bins_heatmap
+
+Founder_missing_bins_heatmap
+
+# Save the plot
+ggsave("Founder_missing_bins_heatmap.png", Founder_missing_bins_heatmap, width=3.98, height=5, dpi=600)
+
+# Save Robject
+saveRDS(Founder_missing_bins_heatmap, "Founder_missing_bins_heatmap.rds")
+```
+
+```{r Founder missing heatmap rotated, include=TRUE, fig.width=4.5, fig.height=2.75}
+
+seq(0, 200, 20)->binsBreaks
+binsBreaks[1]<-1
+
+# Plot binned Founder missing loci along the genome as heatmap
+ggplot(Founder_missing_bins, aes(y = Bin/1000000, x = CHROM, fill = Number_of_Founder_Missing_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "turbo", na.value = "black", begin=0.1, end=0.7, trans="log10", labels=comma) +
+  labs(title = NULL, y = NULL, x = NULL, fill = "# Founder missing loci") +
+  #labs(title = NULL, y = "Position (Mb)", x = NULL, fill = "# Founder missing loci") +
+  theme(
+  panel.background = element_rect(fill="grey20"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank(),
+  axis.title.y = element_text(size = 9.6)
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey20"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", nrow = 2, dir = "v")+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())+
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    axis.text.x = element_text(size = 7),
+    axis.text.y = element_text(size = 7),
+    legend.text = element_text(size = 7),
+    legend.title = element_text(size = 9.6),
+    axis.ticks.length = unit(0.025, "in")
+  )+
+  # make x axis have minor ticks
+  scale_y_continuous(breaks = binsBreaks, minor_breaks = binsBreaks, expand = c(0,0))+
+  scale_x_discrete(expand = c(0,0))+
+  # make legend wider
+  theme(legend.key.width = unit(0.15, "in"),
+        legend.key.height = unit(0.05, "in")
+    )+
+  theme(
+    panel.spacing.x = unit(0.15, "lines"),          # no space between facet columns
+    panel.spacing.y = unit(0.15, "lines"),          # no space between facet rows
+    axis.text.y = element_text(margin = margin(r = 1)), 
+    #plot.margin = margin(0, 0, 0, 0)             # optional: remove outer plot margin
+  )+
+  theme(
+    # Remove space between legend box and the plot
+    legend.box.spacing = unit(0, "pt"),
+    
+    # Remove margin inside the legend box
+    legend.margin = margin(0, 0, 0, 0),
+    
+    # Optionally shrink outer margins around the plot
+    plot.margin = margin(2.5, 4, 0.5, 0.5)
+  )->Founder_missing_bins_heatmap_rotated
+
+get_legend(Founder_missing_bins_heatmap_rotated)->legend_Founder_missing_bins_heatmap_rotated
+
+#ggpubr::as_ggplot(legend_Founder_missing_bins_heatmap_rotated)
+
+#Founder_missing_bins_heatmap_rotated+theme(legend.position="none")->Founder_missing_bins_heatmap_rotated
+
+#Founder_missing_bins_heatmap_rotated
+
+# Save the plot to svg
+ggsave("Founder_missing_bins_heatmap_rotated.svg", Founder_missing_bins_heatmap_rotated, width=3.98, height=2.11)
+
+# Save the plot to png
+ggsave("Founder_missing_bins_heatmap_rotated.png", Founder_missing_bins_heatmap_rotated, width=3.98, height=2.11, dpi=600)
+
+```
+
+```{r generate RI missingness bins}
+# Define bin size (in base pairs)
+bin_size <- 1000000  # 1 Mb bins
+
+# Create a new column for bin assignment
+Processed_Genotypes_Missing$Bin <- floor(Processed_Genotypes_Missing$POS / bin_size) * bin_size
+
+# Summarize RI missing genotype counts per bin
+RI_missing_bins <- Processed_Genotypes_Missing %>%
+  group_by(CHROM, Bin) %>%
+  summarise(Number_of_RI_Missing_Loci = sum(MissingRICount), .groups = "drop")
+
+# Ensure correct ordering of chromosomes for plotting
+RI_missing_bins$CHROM <- factor(RI_missing_bins$CHROM, levels = paste0("chr", c(1:19)))
+
+# Import chromosome lengths to make sure to plot full chromosomes
+chrom_lengths <- read.delim(file.path(COLCROSS_ROOT, "assembly_lengths_for_75_RI_and_founders/all_strains_chromosome_lengths.tsv"), header = FALSE, sep = "\t")
+
+# filter out sex chromosomes and chrM from chrom_lengths
+chrom_lengths <- chrom_lengths %>% filter(V2 != "chrY" & V2 != "chrX" & V2 != "chrM")
+
+# Filter to only include the GRCm39 assembly
+chrom_lengths<-subset(chrom_lengths, V1=="GRCm39.renamed.filtered.fa")
+
+# For each chromosome, add a row with the last bin to ensure full chromosome is plotted. Where the last bin is the chromosome length
+chrom_lengths %>% mutate(Bin = V3 - V3 %% bin_size) -> last_bin_per_chrom
+
+# Add the last bin to the RI_missing_bins dataframe
+RI_missing_bins %>% bind_rows(last_bin_per_chrom) -> RI_missing_bins
+
+# Add an entry for each chromosome at the start of the chromosome to ensure full chromosome is plotted
+RI_missing_bins %>% group_by(CHROM) %>% summarise(Bin = 0) -> first_bin_per_chrom
+
+# Add the first bin to the RI_missing_bins dataframe
+RI_missing_bins %>% bind_rows(first_bin_per_chrom) -> RI_missing_bins
+
+# Filter to exclude the Y chromosome and chrM
+RI_missing_bins %>% filter(CHROM != "chrY" & CHROM != "chrM") -> RI_missing_bins
+
+# Make CHROM a factor sorted by chromosome number
+RI_missing_bins$CHROM <- factor(RI_missing_bins$CHROM, levels = paste0("chr", c(1:19, "X", "Y")))
+```
+
+```{r plot heatmap of RI missingness bins}
+# Plot binned RI missing loci along the genome as heatmap
+ggplot(RI_missing_bins, aes(x = Bin/1000000, y = CHROM, fill = Number_of_RI_Missing_Loci )) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "turbo", na.value = "grey70", begin=0.3, end=0, trans="log10", labels=comma) +
+  labs(title = NULL, x = NULL, y = NULL, fill = "Number of RI missing loci") +
+  theme(
+  panel.background = element_rect(fill="white"),
+  panel.grid.major=element_blank(), #adds major grid lines
+  panel.grid.minor=element_blank(), #adds minor grid lines
+  panel.border=element_rect(fill=NA, color="black", linewidth=1.5, linetype="solid"), #draws a black border around plot
+  axis.line=element_blank()
+  )+
+  theme(legend.position = "bottom")+
+  # Set background to grey
+  theme(panel.background = element_rect(fill = "grey70"))+
+  # Facet wrap by chromosome with free scales and not labels, make facet labels bold
+  facet_wrap(~CHROM, scales = "free", ncol = 5)+
+  # Remove y axis labels
+  theme(axis.text.y = element_blank())+
+  # make x axis have minor ticks
+  scale_x_continuous(breaks = seq(0, 200, 20), minor_breaks = seq(0, 200, 1))+
+  # make legend wider
+  theme(legend.key.width = unit(1, "cm"))+
+  # remove the little minor white lines in the background
+  theme(panel.grid.minor = element_blank())->RI_missing_bins_heatmap
+
+# Save the plot
+ggsave("RI_missing_bins_heatmap.png", RI_missing_bins_heatmap, width=26, height=4.1, dpi=600)
+
+# Save Robject
+saveRDS(RI_missing_bins_heatmap, "RI_missing_bins_heatmap.rds")
+```
+
+```{r plot RI missingness by genomic postion split by chromosome}
+# What fraction of loci have missing data for all 75 RI lines?
+sum(Processed_Genotypes_Missing$MissingRICount==75)/nrow(Processed_Genotypes_Missing)*100
+
+# Plot RI missingness by genomic position split by chromosome
+RI_positional_missingness_plot<-ggplot(Processed_Genotypes_Missing, aes(x=POS/1000000, y=MissingRICount))+
+  geom_jitter(size=0.05, stroke=0, height=0.2)+
+  labs(title="RI missingness by genomic position split by chromosome", x="Genomic position", y="Count of RI missing genotype")+
+  CS.THEME+
+  theme(legend.position="bottom")+
+  facet_wrap(~CHROM, scales="free_x")
+
+# Save the plot
+ggsave("RI_positional_missingness_plot.png", RI_positional_missingness_plot, width=10, height=10, dpi=300)
+```
+
+
+```{r plot composition of Both_Fraction, include=TRUE}
+# make Both_Fraction numeric
+Processed_Genotypes$Founder_Strain_Both_Fraction<-as.numeric(Processed_Genotypes$Founder_Strain_Both_Fraction)
+# make RI_Only_Fraction numeric
+Processed_Genotypes$RI_Only_Fraction<-as.numeric(Processed_Genotypes$RI_Only_Fraction)
+# make Founder_Only_Fraction numeric
+Processed_Genotypes$Founder_Strain_Only_Fraction<-as.numeric(Processed_Genotypes$Founder_Strain_Only_Fraction)
+
+# what percent of loci have a Both_Fraction of less than 1?
+sum(Processed_Genotypes$Founder_Strain_Both_Fraction<1,na.rm = TRUE)/nrow(Processed_Genotypes)*100
+
+# what percent of loci have a RI_Only_Fraction of greater than 0?
+nrow(subset(Processed_Genotypes, Founder_Strain_Both_Fraction<1 & RI_Only_Fraction>0 ))/nrow(Processed_Genotypes)*100
+
+# what percent of loci have a Founder_Only_Fraction of greater than 0?
+nrow(subset(Processed_Genotypes, Founder_Strain_Both_Fraction<1 & Founder_Strain_Only_Fraction>0 ))/nrow(Processed_Genotypes)*100
+
+
+# plot histogram of Both_Fraction
+ggplot(Processed_Genotypes, aes(x=Founder_Strain_Both_Fraction))+
+  geom_histogram(binwidth=0.01, fill="#2d5879", color="black")+
+  labs(title="Histogram of shared capture", x="Fraction of alleles present in both", y="Number of loci")+
+  CS.THEME+
+  scale_x_continuous(breaks=seq(0,1,0.1), limits = c(-0.1,1.1))+
+  # make y axis labels with commas in thousands
+  scale_y_continuous(labels=comma)
+```
+
+```{r prepate to plot composition of Both_Fraction as piechart, include=TRUE}
+# make a pie chart of the composition of Both_Fraction. With categories of 0 to 1 in 0.1 increments
+Processed_Genotypes <- Processed_Genotypes %>%
+  mutate(Both_Fraction_Categories = cut(Founder_Strain_Both_Fraction, breaks=seq(0,1,0.1), right=FALSE))
+
+# Convert to list format for piechart
+Both_Fraction_piechart_data <- list(
+  "0-0.1" = Processed_Genotypes %>% filter(Founder_Strain_Both_Fraction < 0.1) %>% pull(POS),
+  "0.1-0.2" = Processed_Genotypes %>% filter(Founder_Strain_Both_Fraction >= 0.1 & Founder_Strain_Both_Fraction < 0.2) %>% pull(POS),
+  "0.2-0.3" = Processed_Genotypes %>% filter(Founder_Strain_Both_Fraction >= 0.2 & Founder_Strain_Both_Fraction < 0.3) %>% pull(POS),
+  "0.3-0.4" = Processed_Genotypes %>% filter(Founder_Strain_Both_Fraction >= 0.3 & Founder_Strain_Both_Fraction < 0.4) %>% pull(POS),
+  "0.4-0.5" = Processed_Genotypes %>% filter(Founder_Strain_Both_Fraction >= 0.4 & Founder_Strain_Both_Fraction < 0.5) %>% pull(POS),
+  "0.5-0.6" = Processed_Genotypes %>% filter(Founder_Strain_Both_Fraction >= 0.5 & Founder_Strain_Both_Fraction < 0.6) %>% pull(POS),
+  "0.6-0.7" = Processed_Genotypes %>% filter(Founder_Strain_Both_Fraction >= 0.6 & Founder_Strain_Both_Fraction < 0.7) %>% pull(POS),
+  "0.7-0.8" = Processed_Genotypes %>% filter(Founder_Strain_Both_Fraction >= 0.7 & Founder_Strain_Both_Fraction < 0.8) %>% pull(POS),
+  "0.8-0.9" = Processed_Genotypes %>% filter(Founder_Strain_Both_Fraction >= 0.8 & Founder_Strain_Both_Fraction < 0.9) %>% pull(POS),
+  "0.9-1" = Processed_Genotypes %>% filter(Founder_Strain_Both_Fraction >= 0.9) %>% pull(POS)
+)
+
+# Remove empty categories
+Both_Fraction_piechart_data <- Both_Fraction_piechart_data[sapply(Both_Fraction_piechart_data, length) > 0]
+
+data.frame(
+  Both_Fraction_Categories = names(Both_Fraction_piechart_data),
+  count = sapply(Both_Fraction_piechart_data, length)
+)->Both_Fraction_piechart_data
+
+# Add percentage
+Both_Fraction_piechart_data$percentage <- (Both_Fraction_piechart_data$count / sum(Both_Fraction_piechart_data$count)) * 100
+
+# Add label
+Both_Fraction_piechart_data$label <- paste0(round(Both_Fraction_piechart_data$percentage, 2), "%")
+```
+
+```{r plot composition of Both_Fraction as piechart, include=TRUE}
+library(ggrepel)
+library(scales)
+library(dplyr)
+
+# Create Pie Chart with Labels Outside
+ggplot(Both_Fraction_piechart_data, aes(x = "", y = count, fill = Both_Fraction_Categories)) +
+  geom_bar(stat = "identity", width = 1) + 
+  coord_polar("y", start = 0) + 
+  theme_void() +  # Remove background
+  scale_fill_viridis_d(option = "cividis", end = 0, begin = 1) + 
+  labs(title = "Composition of per locus rate of Founder:RI\nunique genotype sharing", 
+       fill = "Fraction of unique\nalleles shared") +
+  theme(legend.title = element_text(face = "bold"),
+        legend.text = element_text(face = "bold"),
+        legend.position = "bottom",
+        legend.key.size = unit(0.5, "cm"),
+        ) +
+  geom_text_repel(aes(y = cumsum(count) - (count / 2), 
+                      label = label), 
+                  size = 3, color = "black", 
+                  nudge_x = 0.75, box.padding = 0.5,
+                  segment.color = "grey30", 
+                  segment.size = 0.8, 
+                  direction = "both",
+                  force=3)->Both_Fraction_piechart
+
+# Save the plot
+ggsave("Both_Fraction_piechart.png", Both_Fraction_piechart, width=5, height=5, dpi=300)
+
+# Save Robject
+saveRDS(Both_Fraction_piechart, "Both_Fraction_piechart.rds")
+```
+
+```{r process composition of Both_Fraction for stacked barplot}
+# from Processed_Genotypes calculate percentage of loci with Both_Fraction less than 1
+# and make a table with the <1 and 1 Both_Fraction percentages (sum to 100%)
+Both_Fraction_Composition_data <- list(
+  "<1" = Processed_Genotypes %>% filter(Founder_Strain_Both_Fraction < 1) %>% pull(POS),
+  "1" = Processed_Genotypes %>% filter(Founder_Strain_Both_Fraction == 1) %>% pull(POS)
+)
+
+100*nrow(subset(Processed_Genotypes, Founder_Strain_Both_Fraction<1 & RI_Only_Fraction>0 ))/nrow(Processed_Genotypes)
+
+100*nrow(subset(Processed_Genotypes, Founder_Strain_Both_Fraction<1 & Founder_Only_Fraction>0 ))/nrow(Processed_Genotypes)
+
+
+# Remove empty categories
+Both_Fraction_Composition_data <- Both_Fraction_Composition_data[sapply(Both_Fraction_Composition_data, length) > 0]
+
+data.frame(
+  Both_Fraction_Categories = names(Both_Fraction_Composition_data),
+  count = sapply(Both_Fraction_Composition_data, length)
+)->Both_Fraction_Composition_data
+
+# Add percentage
+Both_Fraction_Composition_data$percentage <- (Both_Fraction_Composition_data$count / sum(Both_Fraction_Composition_data$count)) * 100
+
+# Add label
+Both_Fraction_Composition_data$label <- paste0(round(Both_Fraction_Composition_data$percentage, 2), "%")
+
+# order categories
+Both_Fraction_Composition_data$Both_Fraction_Categories <- factor(Both_Fraction_Composition_data$Both_Fraction_Categories, levels = c("<1", "1"), ordered = TRUE)
+
+# print table
+print(Both_Fraction_Composition_data)
+```
+
+```{r plot composition of Both_Fraction as stacked barplot, include=TRUE, fig.width=2.4, fig.height=1.07}
+# Plot stacked barplot of Both_Fraction composition
+ggplot(Both_Fraction_Composition_data, aes(y = "", x = count/1000000, fill = Both_Fraction_Categories)) +
+  geom_bar(stat = "identity", position = position_stack(reverse = TRUE), alpha=0.75) + 
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0)) +
+  ylab(NULL) +
+  xlab(NULL) +
+  # xlab("Number of loci (M)") +
+  JFMVTheme +
+  scale_fill_viridis_d(option = "cividis", end = 0.2, begin = 0.8) + 
+  #labs(title = "Per locus Founder:RI shared alleles", fill = "Fraction of unique\nalleles shared") +
+  labs(title = NULL, fill = NULL) +
+  theme(legend.title = element_text(face = "bold", size = 8),
+        legend.text = element_text(face = "bold", size = 8),
+        legend.position = "none",
+        #legend.key.size = unit(0.5, "cm"),
+        axis.text.y = element_text(size = 8),
+        axis.title.y = element_text(size = 9.6),
+        title = element_text(size = 13),
+        axis.line.x.top    = element_blank(),
+        axis.ticks.x.top   = element_blank(),
+        axis.text.x.top    = element_blank(),
+        axis.title.x.top   = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank()
+      )+
+  geom_text(
+  aes(label = label),
+  position = position_stack(vjust = 0.5, reverse = TRUE),  # keep stacked
+  color = "black",
+  size = 13,
+  size.unit = "pt",
+  fontface = "bold"
+)+
+scale_x_break(
+    c(2, 5),      # The gap range to remove
+    space = 0.25,    # Visual space of the "break" in the plot
+    scales = "free",
+    expand = FALSE
+)->Both_Fraction_Composition
+
+Both_Fraction_Composition
+
+# Save the plot
+ggsave("Both_Fraction_Composition.png", Both_Fraction_Composition, width=3.5, height=2, dpi=300)
+
+# Save Robject
+saveRDS(Both_Fraction_Composition, "Both_Fraction_Composition.rds")
+
+# Save svg
+ggsave("Both_Fraction_Composition.svg", Both_Fraction_Composition, width=2.5, height=1.07)
+```
+
+```{r process composition of Both_Fraction for stacked barplot per chromosome}
+# from Processed_Genotypes calculate percentage of loci with Both_Fraction less than 1
+# and make a table with the <1 and 1 Both_Fraction percentages (sum to 100%)
+Both_Fraction_Composition_data_per_chrom <- Processed_Genotypes %>% group_by(CHROM) %>% do({
+  Both_Fraction_Composition_data <- list(
+    "<1" = filter(., Founder_Strain_Both_Fraction < 1) %>% pull(POS),
+    "1" = filter(., Founder_Strain_Both_Fraction == 1) %>% pull(POS)
+  )
+  
+  # Remove empty categories
+  Both_Fraction_Composition_data <- Both_Fraction_Composition_data[sapply(Both_Fraction_Composition_data, length) > 0]
+  
+  data.frame(
+    Both_Fraction_Categories = names(Both_Fraction_Composition_data),
+    count = sapply(Both_Fraction_Composition_data, length)
+  )
+})
+
+# Add percentage
+Both_Fraction_Composition_data_per_chrom <- Both_Fraction_Composition_data_per_chrom %>% mutate(percentage = (count / sum(count)) * 100)
+
+# Add label
+Both_Fraction_Composition_data_per_chrom <- Both_Fraction_Composition_data_per_chrom %>% mutate(label = paste0(round(percentage, 2), "%"))
+
+# Order chromosomes as factors chr1, chr2, chr3, ..., chr19
+Both_Fraction_Composition_data_per_chrom$CHROM<-factor(Both_Fraction_Composition_data_per_chrom$CHROM, levels=paste0("chr", c(1:19)))
+```
+
+```{r plot composition of Both_Fraction as stacked barplot per chromosome, include=TRUE, fig.width=12, fig.height=8}
+# Plot stacked barplot of Both_Fraction composition per chromosome
+ggplot(Both_Fraction_Composition_data_per_chrom, aes(x = CHROM, y = count/1000000, fill = Both_Fraction_Categories)) +
+  geom_bar(stat = "identity", width = 1) + 
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_x_discrete(expand = c(0, 0)) +
+  xlab(NULL) +
+  ylab("Number of loci (M)") +
+  CS.THEME +
+  coord_flip() +
+  scale_fill_viridis_d(option = "cividis", end = 0.8, begin = 0.2) +
+  labs(title = "Per locus Founder:RI shared alleles by chromosome", 
+       fill = "Fraction of unique\nalleles shared") +
+  theme(legend.title = element_text(face = "bold", size = 8),
+        legend.text = element_text(face = "bold", size = 8),
+        legend.position = "bottom",
+        legend.key.size = unit(0.5, "cm"),
+        axis.text.x = element_text(size = 8),
+        axis.title.x = element_text(size = 9.6),
+        title = element_text(size = 13)
+        )+
+  # ggrepel to add labels
+  geom_text(
+  aes(label = label),
+  position = position_stack(vjust = 0.25),  # keep stacked
+  #hjust = 0,                                # move text to the left
+  color = "black")->Both_Fraction_Composition_per_chrom
+
+Both_Fraction_Composition_per_chrom
+
+# Save the plot
+ggsave("Both_Fraction_Composition_per_chrom.png", Both_Fraction_Composition_per_chrom, width=12, height=8, dpi=300)
+
+# Save Robject
+saveRDS(Both_Fraction_Composition_per_chrom, "Both_Fraction_Composition_per_chrom.rds")
+
+# Save svg
+ggsave("Both_Fraction_Composition_per_chrom.svg", Both_Fraction_Composition_per_chrom, width=12, height=8)
+```
+
+```{r per chromosome plot percent of non Both_Fraction, include=TRUE}
+# what percent of loci have a Founder_Strain_Both_Fraction of less than 1? per chromosome
+Processed_Genotypes %>% group_by(CHROM) %>% summarise(Both_Count_Less_Than_1=sum(Founder_Strain_Both_Fraction<1)) -> Both_Fraction_Less_Than_1
+
+# add percentage
+Both_Fraction_Less_Than_1$Both_Fraction_Less_Than_1<-Both_Fraction_Less_Than_1$Both_Count_Less_Than_1/nrow(Processed_Genotypes)
+
+# What percent of loci have a Founder_Strain_Both_Fraction of less than 1?
+sum(Both_Fraction_Less_Than_1$Both_Fraction_Less_Than_1)*100
+
+# order chromosomes as factors chr1, chr2, chr3, ..., chrX, chrY
+Both_Fraction_Less_Than_1$CHROM<-factor(Both_Fraction_Less_Than_1$CHROM, levels=paste0("chr", c(1:19, "X", "Y")))
+Processed_Genotypes$CHROM<-factor(Processed_Genotypes$CHROM, levels=paste0("chr", c(1:19, "X", "Y")))
+
+# plot fraction of loci with Founder_Strain_Both_Fraction less than 1 by chromosome
+ggplot(Both_Fraction_Less_Than_1, aes(x=CHROM, y=Both_Fraction_Less_Than_1))+
+  geom_bar(stat="identity", fill="#2d5879", color="black")+
+  labs(title="Fraction of loci where all alleles not captured by both", x="Chromosome", y="Percent of loci per chromosome")+
+  CS.THEME+
+  theme(axis.text.x=element_text(angle=45, hjust=1))+
+  scale_y_continuous(labels=percent)+
+  theme(legend.position="none")
+
+# Output table
+Both_Fraction_Less_Than_1
+```
+
+
+```{r}
+library(data.table)
+
+setDT(Processed_Genotypes)
+setDT(Founder_only_bins)
+
+sig_bins <- unique(
+  Founder_only_bins[padj <= 0.05, .(
+    CHROM = as.character(CHROM),
+    Bin = as.numeric(Bin)
+  )]
+)
+
+Processed_Genotypes_sig_bins <- copy(Processed_Genotypes)
+Processed_Genotypes_sig_bins[, CHROM := as.character(CHROM)]
+Processed_Genotypes_sig_bins[, Bin := as.numeric(Bin)]
+
+Processed_Genotypes_sig_bins <- Processed_Genotypes_sig_bins[
+  sig_bins,
+  on = .(CHROM, Bin),
+  nomatch = 0
+]
+
+# what percent of loci have a Founder_Strain_Both_Fraction of less than 1? per chromosome
+Processed_Genotypes_sig_bins %>% group_by(CHROM) %>% summarise(Both_Count_Less_Than_1=sum(Founder_Strain_Both_Fraction<1)) -> Both_Fraction_Less_Than_1_sig_bins
+
+# add percentage
+Both_Fraction_Less_Than_1_sig_bins$Both_Fraction_Less_Than_1_sig_bins<-Both_Fraction_Less_Than_1_sig_bins$Both_Count_Less_Than_1/nrow(Processed_Genotypes)*100
+
+# what percent of loci have a Founder_Strain_Both_Fraction of less than 1?
+
+# order chromosomes as factors chr1, chr2, chr3, ..., chrX, chrY
+
+# plot fraction of loci with Founder_Strain_Both_Fraction less than 1 by chromosome
+ggplot(Both_Fraction_Less_Than_1_sig_bins, aes(x=CHROM, y=Both_Fraction_Less_Than_1_sig_bins))+
+  geom_bar(stat="identity", fill="#2d5879", color="black")+
+  labs(title="Fraction of loci where all alleles not captured by both in significant Founder-only bins", x="Chromosome", y="Percent of loci per chromosome")+
+  CS.THEME+
+  theme(axis.text.x=element_text(angle=45, hjust=1))+
+  scale_y_continuous(labels=percent)+
+  theme(legend.position="none")
+
+# Output table
+Both_Fraction_Less_Than_1_sig_bins
+```

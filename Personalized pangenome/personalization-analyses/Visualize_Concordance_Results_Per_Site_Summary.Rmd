@@ -1,0 +1,325 @@
+---
+title: "Visualize Concordance Results per-site summary"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+set.seed(0)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "RI_Personalization/CC_genotype_comparison_to_muga_array/"))
+
+library(ggplot2)
+library(cowplot)
+library(scales)
+library("dplyr")
+library(factoextra)
+library(tidyr)
+source(file.path(REPO_ROOT, "shared-R", "CS_Aesthetic.R"))
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+library(ggrepel)
+library(gridExtra)
+library(reshape2)
+library(ggbeeswarm)
+
+library(ComplexUpset)
+library(dplyr)
+library(patchwork)
+library(data.table)
+```
+
+```{r import_data}
+fread("Mosaic_positional_concordance_norm.site_summary.tsv") -> site_summary
+
+head(site_summary)
+```
+
+```{r calculate_rates, include=FALSE}
+# ============================================================
+# 1. Per-site mismatch rates per founder
+# ============================================================
+
+founders <- LETTERS[1:8]  # A through H
+
+mismatch_counts_to_qual <- function(mismatch, callable) {
+  fifelse(
+    callable <= 0,
+    NA_real_,
+    fifelse(
+      mismatch <= 0,
+      Inf,
+      -10 * log10(mismatch / callable)
+    )
+  )
+}
+
+# Calculate mismatch rate = mismatch / expected for each founder
+# Guard against division by zero with fifelse
+for (f in founders) {
+  exp_col <- paste0("expected_", f)
+  mis_col <- paste0("mismatch_", f)
+  rate_col <- paste0("rate_", f)
+  qual_col <- paste0("qual_", f)
+
+  site_summary[, (rate_col) := fifelse(get(exp_col) == 0, NA_real_, get(mis_col) / get(exp_col))]
+  site_summary[, (qual_col) := mismatch_counts_to_qual(get(mis_col), get(exp_col))]
+}
+
+# Overall site-level mismatch rate
+site_summary[, rate_overall := fifelse(
+  expected_total_alleles == 0,
+  NA_real_,
+  mismatch_total_alleles / expected_total_alleles
+)]
+
+site_summary[, qual_overall := mismatch_counts_to_qual(mismatch_total_alleles, expected_total_alleles)]
+
+# ============================================================
+# 2. Reshape to long format for plotting
+# ============================================================
+
+# --- Long format: mismatch rates per founder per site ---
+rate_cols <- paste0("rate_", founders)
+
+site_rates_long <- melt(
+  site_summary,
+  id.vars       = c("chrom", "start", "end"),
+  measure.vars  = rate_cols,
+  variable.name = "founder",
+  value.name    = "mismatch_rate"
+)
+site_rates_long[, founder := gsub("rate_", "", founder)]
+
+# --- Long format: raw counts (expected + mismatch) ---
+expected_long <- melt(
+  site_summary,
+  id.vars       = c("chrom", "start", "end"),
+  measure.vars  = paste0("expected_", founders),
+  variable.name = "founder",
+  value.name    = "expected"
+)[, founder := gsub("expected_", "", founder)]
+
+mismatch_long <- melt(
+  site_summary,
+  id.vars       = c("chrom", "start", "end"),
+  measure.vars  = paste0("mismatch_", founders),
+  variable.name = "founder",
+  value.name    = "mismatch"
+)[, founder := gsub("mismatch_", "", founder)]
+
+counts_long <- merge(expected_long, mismatch_long, by = c("chrom", "start", "end", "founder"))
+counts_long[, mismatch_rate := fifelse(expected == 0, NA_real_, mismatch / expected)]
+counts_long[, mismatch_qual := mismatch_counts_to_qual(mismatch, expected)]
+
+
+# ============================================================
+# 3. Summarize mismatch patterns across chromosomes
+# ============================================================
+
+# Per-chromosome, per-founder: total expected, total mismatch, aggregate rate
+chrom_founder_summary <- counts_long[,
+  .(total_expected  = sum(expected, na.rm = TRUE),
+    total_mismatch  = sum(mismatch, na.rm = TRUE),
+    n_sites         = .N),
+  by = .(chrom, founder)
+]
+chrom_founder_summary[, agg_rate := fifelse(
+  total_expected == 0,
+  NA_real_,
+  total_mismatch / total_expected
+)]
+chrom_founder_summary[, agg_qual := mismatch_counts_to_qual(total_mismatch, total_expected)]
+
+# Per-chromosome overall
+chrom_summary <- site_summary[,
+  .(total_expected  = sum(expected_total_alleles, na.rm = TRUE),
+    total_mismatch  = sum(mismatch_total_alleles, na.rm = TRUE),
+    n_sites         = .N,
+    mean_rate       = mean(rate_overall, na.rm = TRUE),
+    median_rate     = median(rate_overall, na.rm = TRUE)),
+  by = chrom
+]
+chrom_summary[, agg_rate := fifelse(
+  total_expected == 0,
+  NA_real_,
+  total_mismatch / total_expected
+)]
+chrom_summary[, agg_qual := mismatch_counts_to_qual(total_mismatch, total_expected)]
+
+# Order chromosomes naturally
+chrom_order <- c(paste0("chr", 1:19), "chrX", "chrY", "chrM")
+chrom_summary[, chrom := factor(chrom, levels = chrom_order)]
+chrom_founder_summary[, chrom := factor(chrom, levels = chrom_order)]
+```
+
+```{r summarize_by_chromosome, fig.width=4, fig.height=4}
+# ============================================================
+# 4. Plots
+# ============================================================
+
+# plot total number of mismatch sites per chromosome
+p_nsite_chrom <- ggplot(chrom_summary[!is.na(chrom)], aes(x = chrom, y = n_sites/1e6)) +
+  geom_col(fill = "steelblue") +
+  labs(x = NULL, y = "Number of sites", title = "Number of sites\nper chromosome (millions)") +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+
+# --- Plot A: Aggregate mismatch rate by chromosome ---
+p_chrom <- ggplot(chrom_summary[!is.na(chrom)], aes(x = chrom, y = agg_qual)) +
+  geom_col(fill = "steelblue") +
+  labs(x = NULL, y = "Mismatch QUAL", title = "Aggregate mismatch\nQUAL by chromosome") +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+
+# --- Plot B: Mismatch rate by founder across chromosomes (heatmap) ---
+p_heat <- ggplot(chrom_founder_summary[!is.na(chrom)],
+                 aes(x = founder, y = chrom, fill = agg_qual)) +
+  geom_tile(color = "white") +
+  scale_fill_viridis_c(na.value = "grey90", name = "Mismatch\nQUAL") +
+  labs(x = "Founder", y = NULL, title = "Mismatch QUAL\nby chromosome & founder") +
+  theme_cowplot() +
+  theme(axis.text.y = element_text(size = 8))
+
+# --- Plot C: Distribution of per-site mismatch rates by founder ---
+p_founder_dist <- ggplot(site_rates_long[!is.na(mismatch_rate) & mismatch_rate > 0],
+                         aes(x = founder, y = mismatch_rate)) +
+  geom_violin(fill = "grey85", scale = "width") +
+  geom_boxplot(width = 0.15, outlier.size = 0.5) +
+  scale_y_continuous(labels = percent_format()) +
+  labs(x = "Founder", y = "Per-site mismatch rate",
+       title = "Distribution of mismatch rates\nby founder (sites with >0 mismatch)") +
+  theme_cowplot()
+
+# --- Plot D: Number of mismatching animals per site (histogram) ---
+p_n_mismatch <- ggplot(site_summary, aes(x = n_mismatch_animals)) +
+  geom_histogram(binwidth = 1, fill = "steelblue", color = "white") +
+  labs(x = "Number of mismatching animals", y = "Number of sites (M)",
+       title = "Distribution of discordant\nanimals per site") +
+  theme_cowplot() +
+  scale_y_continuous(labels = scales::comma_format(scale = 1e-6), expand = expansion(mult = c(0, 0.1))) +
+  geom_vline(xintercept = 1.5, linetype = "dashed", color = "grey25", linewidth = 0.8)
+
+p_nsite_chrom
+p_chrom
+p_heat
+p_founder_dist
+p_n_mismatch
+
+```
+
+```{r mismatch_vs_expected, fig.width=5, fig.height=4}
+ggplot(chrom_founder_summary, aes(x=total_mismatch/1e3, y=total_expected/1e3, color=founder)) +
+  geom_point() +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x="Total mismatches (thousands)", y="Total expected (thousands)", title="Mismatch vs expected\nby chromosome & founder") +
+  theme_cowplot() +
+  geom_abline(slope=1, intercept=0, linetype="dashed", color="grey50") +
+  geom_smooth(method="lm", se=FALSE, color="black")
+
+```
+
+```{r mismatch_rate_vs_expected, fig.width=6.5, fig.height=3.5}
+# ============================================================
+# Per-site mismatch rate vs. expected allele count
+# ============================================================
+
+# --- Plot: Rate vs. expected, per founder ---
+# Does mismatch fraction become noisy/inflated as expected
+# count drops?
+
+# --- Hexbin version if you have too many points ---
+p_hex <- ggplot(
+  counts_long[!is.na(mismatch_rate) & expected > 0],
+  aes(x = expected, y = mismatch_rate)
+) +
+  geom_hex(bins = 20) +
+  scale_fill_viridis_c(trans = "log10", name = "Sites", option="magma", begin=0.9, end=0.1) +
+  facet_wrap(~founder, nrow = 2) +
+  scale_y_continuous(labels = percent_format()) +
+  labs(
+    x = "Expected allele count at site",
+    y = "Mismatch rate",
+    title = "Per-site mismatch rate vs. expected (density)"
+  ) +
+  theme_cowplot(font_size = 11) +
+  # set background to grey to better see empty bins
+  theme(panel.background = element_rect(fill = "grey90"))
+
+p_hex
+```
+
+```{r identify_high_mismatch_sites, fig.width=5, fig.height=4}
+# Sites that are incorrect at least 5% of the time
+
+Mismatch_Threshold <- 0.05
+
+High_Mismatch_Sites <- site_summary[
+  expected_total_alleles > 0 &
+  !is.na(rate_overall) &
+  rate_overall >= Mismatch_Threshold
+][order(-rate_overall, -mismatch_total_alleles, chrom, start)]
+
+High_Mismatch_Sites
+nrow(High_Mismatch_Sites)
+
+ggplot(
+  High_Mismatch_Sites,
+  aes(x = rate_overall)
+) +
+  geom_histogram(binwidth = 0.05, fill = "steelblue", color = "white") +
+  labs(
+    title = "Sites with mismatch rate >= 5%",
+    x = "Mismatch rate",
+    y = "Number of sites"
+  ) +
+  theme_cowplot() +
+  scale_x_continuous(labels = percent_format(), expand = c(0, 0)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+```
+
+```{r write_bad_positions_file}
+Mismatch_Threshold <- 0.05
+
+Bad_Positions <- site_summary[
+  expected_total_alleles > 0 &
+  !is.na(rate_overall) &
+  rate_overall >= Mismatch_Threshold,
+  .(
+    chrom,
+    start,
+    end,
+    expected_total_alleles,
+    mismatch_total_alleles,
+    mismatch_rate = rate_overall,
+    mismatch_qual = qual_overall,
+    n_mismatch_animals,
+    n_missing_sample,
+    n_missing_both,
+    n_missing_founder
+  )
+][order(chrom, start, end)]
+
+fwrite(
+  Bad_Positions,
+  "Mosaic_positional_concordance_norm.bad_positions_mismatch_ge_5pct.tsv",
+  sep = "\t"
+)
+
+Bad_Positions
+nrow(Bad_Positions)
+```
+

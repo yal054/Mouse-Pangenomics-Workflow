@@ -1,0 +1,628 @@
+---
+title: "RPVG HST selection vs parental mosaic: genome-wide concordance QC"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Pantranscriptome/Analyze_F1_RPVG_data_exploration/"))
+set.seed(0)
+
+library(data.table)
+library(ggplot2)
+library(cowplot)
+library(scales)
+theme_set(theme_cowplot())
+```
+
+# Purpose
+
+For every expressed haplotype-specific transcript (HST) pair selected by RPVG
+in JJ013 / JJ014 (F1 of CC032 × CC072, liver RNA-seq), check whether the
+selected pair is consistent with the parental strains' founder mosaics at the
+transcript's genomic midpoint.
+
+This is a transcriptome-wide QC of RPVG's HST picks, independent of
+downstream ASE calling: how often does RPVG's chosen HST pair agree with what the CC032 × CC072 mosaic says should be inheritable at each
+locus, and when it disagrees, what does the disagreement look like?
+
+What this test can and cannot tell us:
+
+- It can flag rows where the HST pair is **inconsistent with our mosaic-based
+  reconstruction** of the parental haplotypes at that locus.
+- It cannot, on its own, prove which of three sources caused that
+  inconsistency: (1) RPVG picked an HST that doesn't exist in either parent,
+  (2) the HST → founder assembly manifest is incomplete so a truly valid HST
+  looks off-mosaic, or (3) the `.hap` mosaic segment boundaries are imprecise
+  near the transcript midpoint. The downstream signatures help narrow
+  this down but do not uniquely identify the cause per row.
+
+# Taxonomy
+
+For each row (transcript × sample) define:
+
+- `cand1` = founder candidate set for **Name_1** (from the HST → founder
+  assembly manifest)
+- `cand2` = founder candidate set for **Name_2**
+- `parent1_founders` / `parent2_founders` = founder codes from CC032 / CC072
+  `.hap` mosaic at the transcript midpoint
+- `valid_f1_pairs` = unordered founder pairs producible by the F1 given the
+  two parental mosaics (one founder from each parent)
+- `pool = parent1_founders ∪ parent2_founders`
+
+### Per-side status
+
+| `side_status` | definition |
+|---|---|
+| `in_pool_singleton` | single founder, in pool |
+| `in_pool_ambiguous` | multiple founders, all in pool |
+| `mixed` | some founders in pool, some outside |
+| `off_mosaic` | non-empty, **disjoint** from pool |
+| `empty` | missing / no candidates |
+
+### Pair mode (mutually exclusive, ordered best → worst)
+
+| `pair_mode` | group | definition |
+|---|---|---|
+| `gold_unique_singleton` | **concordant** | each side is a single founder AND that ordered pair ∈ `valid_f1_pairs` |
+| `strict_ambiguous_within_pair` | **concordant** | `cand1 ∪ cand2` ⊆ founders of some valid pair (no off-mosaic founders invoked) |
+| `permissive_with_extras` | **concordant (soft)** | a valid pair can be reconstructed, but `cand1 ∪ cand2` extends outside that pair |
+| `pool_but_no_cross_pair` | **discordant** | both sides in pool, but no valid F1 pair has one side in `cand1` and the other in `cand2` |
+| `one_side_off_mosaic` | **discordant** | exactly one side is `off_mosaic` |
+| `both_off_mosaic` | **discordant** | both sides `off_mosaic` |
+| `no_info` | — | missing data |
+
+The three discordant modes together form the **hard-error set**. They are
+the complement of the permissive concordance criterion.
+
+# Inputs
+
+```{r load_inputs}
+JJ_expr <- fread("JJ_high_prob_filtered_simplified.tsv")
+sig_tx  <- unique(fread("DESeq2_ASE_significant_lfc1.txt")$Transcript_cluster)
+Founders_info <- fread("Founders-pantranscriptome-info.tsv")
+
+parent_files <- list(
+  CC032 = "CC032-GeniUncM1247_NYGC.hap",
+  CC072 = "CC072-TauUncM3054_NYGC.hap"
+)
+gtf_path <- "../../../DO_Striatum_RNAseq/Initial_test_rpvg_results/Mus_musculus.GRCm39.114.chr.gtf"
+
+cat("expressed HST rows:", nrow(JJ_expr),
+    "| unique transcripts:", uniqueN(JJ_expr$Transcript_cluster), "\n")
+```
+
+# Helpers
+
+```{r helpers}
+founder_letters <- c("A","B","C","D","E","F","G","H")
+founder_strains <- c(A = "A/J",     B = "C57BL/6J", C = "129S1/SvImJ",
+                     D = "NOD/ShiLtJ", E = "NZO/HlLtJ", F = "CAST/EiJ",
+                     G = "PWK/PhJ", H = "WSB/EiJ")
+
+normalize_founder_code <- function(x) {
+  x <- toupper(gsub("[^A-Z0-9]", "", as.character(x)))
+  out <- rep(NA_character_, length(x))
+  out[x %in% c("A","AJ")]                         <- "A"
+  out[x %in% c("B","B6","BL6","C57BL6J","C57BL6")]<- "B"
+  out[x %in% c("C","129S1SVIMJ","129S1")]         <- "C"
+  out[x %in% c("D","NODSHILTJ","NOD")]            <- "D"
+  out[x %in% c("E","NZOHLLTJ","NZO")]             <- "E"
+  out[x %in% c("F","CASTEIJ","CAST")]             <- "F"
+  out[x %in% c("G","PWKPHJ","PWK")]               <- "G"
+  out[x %in% c("H","WSBEIJ","WSB")]               <- "H"
+  out
+}
+pair_string <- function(a, b) {
+  if (is.na(a) || is.na(b)) return(NA_character_)
+  paste(sort(c(a, b)), collapse = "/")
+}
+parse_set <- function(s) {
+  if (is.na(s) || s == "") return(character(0))
+  sort(unique(trimws(unlist(strsplit(s, "/", fixed = TRUE)))))
+}
+parse_pairs <- function(s) {
+  if (is.na(s) || s == "") return(list())
+  pairs <- strsplit(s, ";", fixed = TRUE)[[1]]
+  lapply(pairs, function(p) sort(trimws(unlist(strsplit(p, "/", fixed = TRUE)))))
+}
+```
+
+# HST → founder-candidate lookup
+
+```{r build_hst_lookup}
+finf <- Founders_info[, .(
+  Transcript_cluster = as.character(Transcripts),
+  Haplotype_label    = sub("^.*_([^_]+)$", "\\1", Name),
+  Haplotypes_raw     = as.character(Haplotypes)
+)]
+
+finf_long <- finf[, .(
+  assembly_token = trimws(unlist(strsplit(Haplotypes_raw, ",")))
+), by = .(Transcript_cluster, Haplotype_label)]
+finf_long <- finf_long[assembly_token != ""]
+finf_long[, assembly_name := sub("#.*$","", assembly_token)]
+
+assembly_key <- data.table(
+  assembly_name = c("A_J","C57BL_6_T2T_Yu","C57BL_6J_T2T_Keane","129S1_SvImJ",
+                    "NOD_ShiLtJ","NZO_HlLtJ","CAST_EiJ","CAST_EiJ_T2T_Keane",
+                    "PWK_PhJ","WSB_EiJ"),
+  founder_code  = c("A","B","B","C","D","E","F","F","G","H"))
+finf_long <- merge(finf_long, assembly_key, by = "assembly_name", all.x = TRUE)
+
+unknown <- unique(finf_long[is.na(founder_code), assembly_name])
+if (length(unknown) > 0) warning("unrecognized assemblies: ",
+                                 paste(unknown, collapse = ", "))
+
+hst_lookup <- finf_long[!is.na(founder_code), .(
+  founder_candidates_str = paste(sort(unique(founder_code)), collapse = "/"),
+  n_candidates           = uniqueN(founder_code)
+), by = .(Transcript_cluster, Haplotype_label)]
+```
+
+# Parental mosaic segments
+
+```{r read_hap_mosaic}
+read_hap_mosaic <- function(file, parent_label) {
+  lines <- readLines(file)
+  chr_lines <- lines[grepl("^chr", lines)]
+  chrom_seen <- list()
+  out_list <- vector("list", length(chr_lines))
+
+  for (i in seq_along(chr_lines)) {
+    tok <- strsplit(chr_lines[i], ",", fixed = TRUE)[[1]]
+    chrom <- sub("^chr", "", tok[1], ignore.case = TRUE)
+    chrom_seen[[chrom]] <- (if (is.null(chrom_seen[[chrom]])) 0L else chrom_seen[[chrom]]) + 1L
+    homolog <- chrom_seen[[chrom]]
+
+    seg <- tok[-c(1, 2)]
+    founder  <- seg[seq(1, length(seg), by = 3)]
+    start_bp <- as.integer(seg[seq(2, length(seg), by = 3)])
+    end_bp   <- as.integer(seg[seq(3, length(seg), by = 3)])
+
+    out_list[[i]] <- data.table(
+      parent = parent_label, chrom = chrom, homolog = homolog,
+      founder_code = normalize_founder_code(founder),
+      start_bp = start_bp, end_bp = end_bp)
+  }
+  rbindlist(out_list, use.names = TRUE, fill = TRUE)
+}
+
+mosaic_dt <- rbindlist(lapply(names(parent_files),
+                              function(p) read_hap_mosaic(parent_files[[p]], p)))
+mos_split <- split(mosaic_dt, by = c("parent","chrom"), keep.by = FALSE)
+for (nm in names(mos_split)) mos_split[[nm]] <- mos_split[[nm]][order(start_bp)]
+```
+
+# Transcript midpoints
+
+```{r tx_midpoints}
+gtf <- fread(gtf_path, sep = "\t", header = FALSE, quote = "", fill = TRUE,
+             comment.char = "#")
+setnames(gtf, c("chr","source","feature","start","end","score","strand",
+                "frame","attributes"))
+gtf_tx <- gtf[feature == "transcript"]
+gtf_tx[, transcript_id     := sub('.*transcript_id "([^"]+)".*','\\1', attributes)]
+gtf_tx[, Transcript_cluster:= sub("\\..*$", "", transcript_id)]
+gtf_tx[, tx_chr            := sub("^chr","", as.character(chr), ignore.case = TRUE)]
+gtf_tx[, tx_mid            := as.integer(round((as.integer(start) + as.integer(end)) / 2))]
+tx_coords <- unique(gtf_tx[, .(Transcript_cluster, tx_chr, tx_mid)])
+```
+
+# Annotate expressed rows
+
+```{r annotate_rows}
+expr <- merge(JJ_expr,
+              hst_lookup[, .(Transcript_cluster,
+                             Name_1 = Haplotype_label,
+                             founder_1_candidates_str = founder_candidates_str,
+                             founder_1_n_candidates   = n_candidates)],
+              by = c("Transcript_cluster","Name_1"), all.x = TRUE)
+expr <- merge(expr,
+              hst_lookup[, .(Transcript_cluster,
+                             Name_2 = Haplotype_label,
+                             founder_2_candidates_str = founder_candidates_str,
+                             founder_2_n_candidates   = n_candidates)],
+              by = c("Transcript_cluster","Name_2"), all.x = TRUE)
+
+expr <- merge(expr, tx_coords, by = "Transcript_cluster", all.x = TRUE)
+
+loci <- unique(expr[!is.na(tx_chr) & !is.na(tx_mid), .(tx_chr, tx_mid)])
+
+lookup_parent_at <- function(parent, chrom, pos) {
+  sub <- mos_split[[paste0(parent, ".", chrom)]]
+  if (is.null(sub) || nrow(sub) == 0 || is.na(pos)) return(NA_character_)
+  hits <- sub[start_bp <= pos & end_bp >= pos]
+  if (nrow(hits) == 0) {
+    d <- pmin(abs(sub$start_bp - pos), abs(sub$end_bp - pos))
+    hits <- sub[d == min(d)]
+  }
+  paste(sort(unique(hits$founder_code)), collapse = "/")
+}
+loci[, parent1_founders := mapply(lookup_parent_at, "CC032", tx_chr, tx_mid)]
+loci[, parent2_founders := mapply(lookup_parent_at, "CC072", tx_chr, tx_mid)]
+
+expr <- merge(expr, loci, by = c("tx_chr","tx_mid"), all.x = TRUE)
+
+make_valid_pairs <- function(p1, p2) {
+  p1 <- parse_set(p1); p2 <- parse_set(p2)
+  if (!length(p1) || !length(p2)) return(NA_character_)
+  grid <- expand.grid(p1, p2, stringsAsFactors = FALSE)
+  paste(sort(unique(mapply(pair_string, grid[[1]], grid[[2]]))),
+        collapse = ";")
+}
+expr[, valid_f1_pairs := mapply(make_valid_pairs,
+                                parent1_founders, parent2_founders)]
+expr[, is_sig := Transcript_cluster %in% sig_tx]
+```
+
+# Classifier
+
+```{r classify_rows}
+side_status <- function(cand_str, pool) {
+  cand <- parse_set(cand_str)
+  if (!length(cand)) return("empty")
+  inter <- intersect(cand, pool); outside <- setdiff(cand, pool)
+  if (!length(inter))  return("off_mosaic")
+  if (length(outside)) return("mixed")
+  if (length(cand) == 1) return("in_pool_singleton")
+  "in_pool_ambiguous"
+}
+
+pair_mode_fn <- function(c1s, c2s, p1s, p2s, vps) {
+  c1 <- parse_set(c1s); c2 <- parse_set(c2s)
+  p1 <- parse_set(p1s); p2 <- parse_set(p2s)
+  vpairs <- parse_pairs(vps)
+  pool <- unique(c(p1, p2))
+
+  if (!length(c1) || !length(c2) || !length(p1) || !length(p2) || !length(vpairs))
+    return("no_info")
+
+  c1_in_pool <- any(c1 %in% pool)
+  c2_in_pool <- any(c2 %in% pool)
+  if (!c1_in_pool && !c2_in_pool) return("both_off_mosaic")
+  if (!c1_in_pool ||  !c2_in_pool) return("one_side_off_mosaic")
+
+  permissive <- any(sapply(vpairs, function(p) {
+    if (p[1] == p[2]) return(p[1] %in% c1 && p[1] %in% c2)
+    (p[1] %in% c1 & p[2] %in% c2) | (p[2] %in% c1 & p[1] %in% c2)
+  }))
+  if (!permissive) return("pool_but_no_cross_pair")
+
+  vf_list <- lapply(vpairs, unique)
+  cand_union <- unique(c(c1, c2))
+  strict <- any(sapply(vf_list, function(vf) all(cand_union %in% vf)))
+  if (!strict) return("permissive_with_extras")
+
+  if (length(c1) == 1 && length(c2) == 1) {
+    tryPair <- sort(c(c1, c2))
+    if (any(sapply(vpairs, function(p) identical(sort(p), tryPair))))
+      return("gold_unique_singleton")
+  }
+  "strict_ambiguous_within_pair"
+}
+
+expr[, parents_pool := mapply(function(a,b)
+  paste(sort(unique(c(parse_set(a), parse_set(b)))), collapse = "/"),
+  parent1_founders, parent2_founders)]
+expr[, side1_status := sapply(seq_len(.N),
+                              function(i) side_status(founder_1_candidates_str[i],
+                                                      parse_set(parents_pool[i])))]
+expr[, side2_status := sapply(seq_len(.N),
+                              function(i) side_status(founder_2_candidates_str[i],
+                                                      parse_set(parents_pool[i])))]
+expr[, pair_mode := mapply(pair_mode_fn,
+                           founder_1_candidates_str, founder_2_candidates_str,
+                           parent1_founders, parent2_founders, valid_f1_pairs)]
+
+mode_levels <- c("gold_unique_singleton",
+                 "strict_ambiguous_within_pair",
+                 "permissive_with_extras",
+                 "pool_but_no_cross_pair",
+                 "one_side_off_mosaic",
+                 "both_off_mosaic",
+                 "no_info")
+side_levels <- c("in_pool_singleton","in_pool_ambiguous","mixed",
+                 "off_mosaic","empty")
+expr[, pair_mode    := factor(pair_mode, levels = mode_levels)]
+expr[, side1_status := factor(side1_status, levels = side_levels)]
+expr[, side2_status := factor(side2_status, levels = side_levels)]
+
+discordant_modes <- c("pool_but_no_cross_pair",
+                      "one_side_off_mosaic",
+                      "both_off_mosaic")
+expr[, concordant := !(pair_mode %in% discordant_modes)]
+```
+
+# Genome-wide concordance
+
+```{r headline_rates}
+headline <- expr[, .(
+  n_rows                 = .N,
+  n_unique_transcripts   = uniqueN(Transcript_cluster),
+  frac_concordant        = mean(concordant, na.rm = TRUE),
+  frac_gold              = mean(pair_mode == "gold_unique_singleton", na.rm = TRUE),
+  frac_strict_ambiguous  = mean(pair_mode == "strict_ambiguous_within_pair", na.rm = TRUE),
+  frac_permissive_extras = mean(pair_mode == "permissive_with_extras", na.rm = TRUE),
+  frac_discordant        = mean(!concordant, na.rm = TRUE),
+  frac_one_side_off      = mean(pair_mode == "one_side_off_mosaic", na.rm = TRUE),
+  frac_both_off          = mean(pair_mode == "both_off_mosaic", na.rm = TRUE),
+  frac_pool_no_cross     = mean(pair_mode == "pool_but_no_cross_pair", na.rm = TRUE)
+)]
+headline
+```
+
+```{r pair_mode_overall}
+tab_all <- expr[, .(n = .N), by = pair_mode][order(pair_mode)]
+tab_all[, pct := round(n / sum(n) * 100, 2)]
+tab_all
+```
+
+```{r pair_mode_overall_plot, fig.width=7, fig.height=3}
+group_map <- c(
+  gold_unique_singleton         = "concordant",
+  strict_ambiguous_within_pair  = "concordant",
+  permissive_with_extras        = "concordant (soft)",
+  pool_but_no_cross_pair        = "discordant",
+  one_side_off_mosaic           = "discordant",
+  both_off_mosaic               = "discordant",
+  no_info                       = "no info")
+tab_all[, group := group_map[as.character(pair_mode)]]
+tab_all[, group := factor(group,
+                          levels = c("concordant","concordant (soft)",
+                                     "discordant","no info"))]
+
+ggplot(tab_all, aes(x = pair_mode, y = pct, fill = group)) +
+  geom_col() +
+  labs(x = NULL, y = "% of expressed rows",
+       fill = NULL,
+       title = "RPVG HST pair vs parental mosaic: genome-wide") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+# Genome-wide discordant rows
+
+About 8% of expressed rows are discordant, mostly `one_side_off_mosaic`.
+
+```{r discordant_drilldown}
+disc <- expr[pair_mode %in% discordant_modes]
+cat("total discordant rows:", nrow(disc),
+    " | one_side_off_mosaic:", sum(disc$pair_mode == "one_side_off_mosaic"),
+    " | both_off_mosaic:",     sum(disc$pair_mode == "both_off_mosaic"),
+    " | pool_no_cross:",       sum(disc$pair_mode == "pool_but_no_cross_pair"), "\n")
+```
+
+## Which side is off? (one_side_off_mosaic rows)
+
+```{r which_side}
+one_off <- expr[pair_mode == "one_side_off_mosaic"]
+
+off_side_info <- function(row) {
+  pool <- unique(c(parse_set(row$parent1_founders), parse_set(row$parent2_founders)))
+  c1 <- parse_set(row$founder_1_candidates_str)
+  c2 <- parse_set(row$founder_2_candidates_str)
+  c1_in <- any(c1 %in% pool); c2_in <- any(c2 %in% pool)
+  if (c1_in && !c2_in) {
+    data.table(Transcript_cluster = row$Transcript_cluster, Sample = row$Sample,
+               off_side = "side2", off_hst_name = row$Name_2,
+               in_hst_name = row$Name_1,
+               off_founders_str = paste(c2, collapse = "/"),
+               in_founders_str  = paste(c1, collapse = "/"),
+               ReadCount_1 = row$ReadCount_1, ReadCount_2 = row$ReadCount_2,
+               tx_chr = row$tx_chr, is_sig = row$is_sig)
+  } else if (c2_in && !c1_in) {
+    data.table(Transcript_cluster = row$Transcript_cluster, Sample = row$Sample,
+               off_side = "side1", off_hst_name = row$Name_1,
+               in_hst_name = row$Name_2,
+               off_founders_str = paste(c1, collapse = "/"),
+               in_founders_str  = paste(c2, collapse = "/"),
+               ReadCount_1 = row$ReadCount_1, ReadCount_2 = row$ReadCount_2,
+               tx_chr = row$tx_chr, is_sig = row$is_sig)
+  } else NULL
+}
+rows_list <- lapply(seq_len(nrow(one_off)), function(i) off_side_info(one_off[i]))
+off_dt <- rbindlist(rows_list[!sapply(rows_list, is.null)])
+
+off_dt[, off_is_R1 := off_hst_name == "R1"]
+off_dt[, in_is_R1  := in_hst_name  == "R1"]
+
+cat("side2 off:", sum(off_dt$off_side == "side2"),
+    "| side1 off:", sum(off_dt$off_side == "side1"), "\n")
+cat(sprintf("off-mosaic HST is R1 in %.1f%% of rows; in-mosaic HST is R1 in %.1f%%\n",
+            100 * mean(off_dt$off_is_R1), 100 * mean(off_dt$in_is_R1)))
+```
+
+## Which founders sit on the off-mosaic side? (genome-wide)
+
+```{r off_founder_enrichment}
+# fractional weighting per off side
+off_founder_counts <- off_dt[, {
+  f <- parse_set(off_founders_str)
+  if (!length(f)) f <- character(0)
+  .(founder_code = f, weight = rep(1 / max(length(f), 1), length(f)))
+}, by = .(Transcript_cluster, Sample)]
+off_founder_summary <- off_founder_counts[, .(off_n = sum(weight)),
+                                          by = founder_code]
+off_founder_summary[, off_fraction := off_n / sum(off_n)]
+
+# genome-wide baseline = parental pool distribution across all expressed rows
+pool_counts <- expr[, {
+  p <- unique(c(parse_set(parent1_founders), parse_set(parent2_founders)))
+  if (!length(p)) p <- character(0)
+  .(founder_code = p, weight = rep(1 / max(length(p), 1), length(p)))
+}, by = .(Transcript_cluster, Sample)]
+pool_summary <- pool_counts[, .(pool_n = sum(weight)), by = founder_code]
+pool_summary[, pool_fraction := pool_n / sum(pool_n)]
+
+merged_counts <- merge(off_founder_summary, pool_summary,
+                       by = "founder_code", all = TRUE)
+merged_counts[, founder_strain := founder_strains[founder_code]]
+merged_counts[, enrichment_log2 :=
+                 log2((off_fraction + 0.005) / (pool_fraction + 0.005))]
+
+n_off_tot  <- sum(merged_counts$off_n,  na.rm = TRUE)
+n_pool_tot <- sum(merged_counts$pool_n, na.rm = TRUE)
+fisher_per_founder <- merged_counts[, {
+  a <- round(off_n);  b  <- round(n_off_tot  - off_n)
+  c <- round(pool_n); dd <- round(n_pool_tot - pool_n)
+  ft <- fisher.test(matrix(c(a, b, c, dd), nrow = 2, byrow = TRUE))
+  .(founder_code, founder_strain,
+    OR = round(unname(ft$estimate), 2),
+    p  = signif(ft$p.value, 3))
+}, by = seq_len(nrow(merged_counts))]
+fisher_per_founder[, FDR := signif(p.adjust(p, method = "fdr"), 3)]
+fisher_per_founder[, seq_len := NULL]
+setorder(fisher_per_founder, p)
+
+cat("Off-mosaic founder enrichment vs genome-wide parental pool:\n")
+print(merged_counts[order(-enrichment_log2)])
+cat("\nFisher tests per founder:\n"); print(fisher_per_founder)
+```
+
+```{r off_mosaic_plot, fig.width=6, fig.height=3.5}
+plot_dt <- rbind(
+  off_founder_summary[, .(founder_code, fraction = off_fraction,
+                          set = "off-mosaic side (discordant rows)")],
+  pool_summary       [, .(founder_code, fraction = pool_fraction,
+                          set = "parental pool baseline")]
+)
+plot_dt[, founder_strain := founder_strains[founder_code]]
+plot_dt[, founder_strain := factor(founder_strain, levels = founder_strains)]
+ggplot(plot_dt, aes(x = founder_strain, y = fraction, fill = set)) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(labels = percent_format()) +
+  labs(x = NULL, y = "fractional founder mass",
+       fill = NULL,
+       title = "Founder on off-mosaic side vs genome-wide pool") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+## Read-count signature
+
+Does the off-mosaic HST carry the majority of reads, or is it a low-count sink?
+
+```{r read_count_check}
+off_dt[, off_reads := ifelse(off_side == "side1", ReadCount_1, ReadCount_2)]
+off_dt[, in_reads  := ifelse(off_side == "side1", ReadCount_2, ReadCount_1)]
+off_dt[, off_wins  := off_reads > in_reads]
+
+off_dt[, .(n = .N,
+           pct_off_is_major = round(mean(off_wins, na.rm = TRUE) * 100, 1),
+           median_off_reads = median(off_reads, na.rm = TRUE),
+           median_in_reads  = median(in_reads,  na.rm = TRUE))]
+```
+
+## Chromosomal distribution
+
+```{r chr_distribution}
+chr_all <- expr[, .(n_total = .N), by = tx_chr]
+chr_disc <- expr[concordant == FALSE, .(n_discordant = .N), by = tx_chr]
+chr_compare <- merge(chr_all, chr_disc, by = "tx_chr", all.x = TRUE)
+chr_compare[is.na(n_discordant), n_discordant := 0]
+chr_compare[, frac_discordant := n_discordant / n_total]
+setorder(chr_compare, -frac_discordant)
+chr_compare
+```
+
+```{r chr_plot, fig.width=7, fig.height=3.5}
+chr_compare[, tx_chr := factor(tx_chr,
+                               levels = chr_compare[order(-frac_discordant), tx_chr])]
+ggplot(chr_compare, aes(x = tx_chr, y = frac_discordant)) +
+  geom_col() +
+  scale_y_continuous(labels = percent_format()) +
+  labs(x = "chromosome",
+       y = "fraction of expressed rows that are discordant",
+       title = "Discordance rate by chromosome (genome-wide)")
+```
+
+# Side-status joint distribution
+
+```{r side_joint}
+joint_all <- dcast(expr[, .N, by = .(side1_status, side2_status)],
+                   side1_status ~ side2_status, value.var = "N", fill = 0)
+joint_all
+```
+
+# Secondary: discordance enrichment among ASE-significant calls
+
+Used as a filter to decide which DESeq2 ASE calls to trust for downstream
+biology.
+
+```{r sig_filter_flag}
+tab_sig <- dcast(
+  expr[, .N, by = .(is_sig, pair_mode)],
+  pair_mode ~ is_sig, value.var = "N", fill = 0)
+setnames(tab_sig, c("FALSE","TRUE"), c("n_nonsig","n_sig"))
+tab_sig[, pct_nonsig := round(n_nonsig / sum(n_nonsig) * 100, 2)]
+tab_sig[, pct_sig    := round(n_sig    / sum(n_sig)    * 100, 2)]
+setorder(tab_sig, pair_mode)
+
+# Fisher on concordance binary
+tab_bin <- with(expr, table(is_sig, concordant))
+ft_bin  <- fisher.test(tab_bin)
+tab_bin
+cat(sprintf("Fisher OR (sig vs non-sig, concordant vs discordant): %.2f | 95%%CI [%.2f, %.2f] | p=%.2e\n",
+            ft_bin$estimate, ft_bin$conf.int[1], ft_bin$conf.int[2],
+            ft_bin$p.value))
+tab_sig
+```
+
+# Clean transcript set
+
+Transcripts with `gold_unique_singleton` in both JJ013 and JJ014, for use as a
+strict high-confidence ASE set.
+
+```{r clean_tx}
+clean_tx <- expr[, .(
+  both_gold = all(pair_mode == "gold_unique_singleton") & .N == 2
+), by = Transcript_cluster][both_gold == TRUE]
+
+cat("gold transcripts (both samples):",
+    nrow(clean_tx), "/", uniqueN(expr$Transcript_cluster), "\n")
+```
+
+# Save outputs
+
+```{r save_outputs}
+dir.create("OffMosaic_drilldown", showWarnings = FALSE, recursive = TRUE)
+
+fwrite(expr,      "HST_concordance_full_taxonomy_per_row.tsv", sep = "\t")
+fwrite(headline,  "HST_concordance_headline_rates.tsv",        sep = "\t")
+fwrite(tab_all,   "HST_pair_mode_overall.tsv",                 sep = "\t")
+fwrite(tab_sig,   "HST_pair_mode_by_sig.tsv",                  sep = "\t")
+fwrite(joint_all, "HST_side_status_joint_all.tsv",             sep = "\t")
+fwrite(chr_compare, "HST_discordance_by_chromosome.tsv",       sep = "\t")
+
+fwrite(off_dt,              "OffMosaic_drilldown/one_side_off_mosaic_per_row.tsv", sep = "\t")
+fwrite(merged_counts,       "OffMosaic_drilldown/off_mosaic_vs_pool_enrichment.tsv", sep = "\t")
+fwrite(fisher_per_founder,  "OffMosaic_drilldown/off_mosaic_founder_fisher.tsv", sep = "\t")
+fwrite(clean_tx,            "HST_clean_transcripts_gold.tsv", sep = "\t")
+```
+
+# Caveats
+
+An 8% genome-wide hard-error rate is consistent with at least three
+non-exclusive mechanisms, and this QC alone cannot resolve their relative
+contribution per row:
+
+1. **RPVG HST mis-assignment.** The chosen HST is not present in
+   either parent. The off-mosaic-side founder enrichment (wild-derived
+   founders: PWK, CAST, WSB) and the tendency of the off-mosaic HST to carry
+   the minor read count support this as a contributor.
+2. **Incomplete HST → founder assembly manifest.** An HST that truly does
+   exist in the expected founder may be absent from `Founders-pantranscriptome-info.tsv`'s
+   assembly list for that founder. Such rows would look mosaic-discordant
+   even though the HST pick is correct.
+3. **Mosaic segment-boundary imprecision.** Transcript midpoints near `.hap`
+   segment breakpoints may be assigned the wrong expected founder.
+
+The genome-wide rate and its founder / chromosome signatures are
+reproducible summaries of agreement with our reconstruction, not a direct
+measure of RPVG error.

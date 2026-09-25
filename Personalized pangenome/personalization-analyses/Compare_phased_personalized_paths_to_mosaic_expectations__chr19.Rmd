@@ -1,0 +1,255 @@
+---
+title: "Visualize personalized graph genotypes: multi-chromosome"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+set.seed(0)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "RI_Personalization/Compare_phased_personalized_paths_to_mosaic_expectations__chr19/"))
+
+library(ggplot2)
+library(cowplot)
+library(scales)
+library("dplyr")
+library(factoextra)
+library(tidyr)
+source(file.path(REPO_ROOT, "shared-R", "CS_Aesthetic.R"))
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+library(ggrepel)
+library(gridExtra)
+library(reshape2)
+library(ggbeeswarm)
+library(ComplexUpset)
+library(dplyr)
+library(patchwork)
+library(VariantAnnotation)
+library(ggnewscale)
+```
+
+```{r load_hapl}
+read_hapl <- function(path) {
+  lines <- readLines(path, warn = FALSE)
+  chrom_lines <- grep("^chr[0-9XYM]+,", lines, value = TRUE)
+  out <- vector("list", length(chrom_lines))
+  k <- 0L
+  for (i in seq_along(chrom_lines)) {
+    x <- chrom_lines[i]
+    fields <- strsplit(x, ",", fixed = TRUE)[[1]]
+    chrom <- fields[1]
+    trip <- fields[-c(1, 2)]
+    trip <- trip[trip != ""]
+    n <- length(trip)
+    if (n %% 3 != 0) stop(sprintf("Line %d: expected founder/start/end triplets; got %d tokens: %s", i, n, x))
+    founder <- trip[seq(1, n, by = 3)]
+    start   <- suppressWarnings(as.integer(trip[seq(2, n, by = 3)]))
+    end     <- suppressWarnings(as.integer(trip[seq(3, n, by = 3)]))
+    if (any(is.na(start)) || any(is.na(end))) stop(sprintf("Line %d: non-integer start/end encountered: %s", i, x))
+    k <- k + 1L
+    out[[k]] <- data.frame(hapl_line = i, chrom = chrom, block = seq_along(founder),
+                           founder = founder, start = start, end = end, stringsAsFactors = FALSE)
+  }
+  do.call(rbind, out[seq_len(k)])
+}
+
+hapl_df <- read_hapl("../CC_genotype_comparison_to_muga_array/Test_merging_personalized_walks_into_full_graph/CC001_deconstructed_vcf_R_analysis/CC010.hap")
+head(hapl_df)
+table(hapl_df$chrom)
+```
+
+```{r prepare_hapl}
+hapl_df2 <- hapl_df %>%
+  group_by(chrom) %>%
+  arrange(hapl_line, .by_group = TRUE) %>%
+  mutate(hap = dense_rank(hapl_line)) %>%
+  ungroup()
+
+table(hapl_df2$chrom, hapl_df2$hap)
+
+hapl_plot_all <- hapl_df2 %>%
+  filter(hap %in% c(1, 2)) %>%
+  mutate(
+    SAMPLE = ifelse(hap == 1, "Expected hap1", "Expected hap2"),
+    xmin = start / 1e6,
+    xmax = end   / 1e6,
+    ymin = 0,
+    ymax = 1
+  )
+```
+
+```{r compute, include=FALSE}
+#chromosomes <- c("chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10",
+#                 "chr11", "chr12", "chr13", "chr14", "chr15", "chr16", "chr17",
+#                 "chr18", "chr19")
+
+chromosomes <- c("chr19")
+sample_levels <- c(
+  "Expected hap1", "Expected hap2",
+  "A/J", "C57BL/6J", "129S1/SvImJ", "NOD/ShiLtJ", "NZO/HlLtJ",
+  "CAST/EiJ", "PWK/PhJ", "WSB/EiJ",
+  "CC010 hap1", "CC010 hap2"
+)
+
+founder_colors <- c(
+  "A" = "#F0E442", "B" = "#555555", "C" = "#E69F00", "D" = "#0072B2",
+  "E" = "#56B4E9", "F" = "#009E73", "G" = "#D55E00", "H" = "#CC79A7"
+)
+
+results <- list()
+
+for (chr in chromosomes) {
+
+  #chr <-"chr19"
+  # --- Import VCF ---
+  vcf <- readVcf(sprintf("RI_Phased_%s.vcf.gz", chr), genome = "mm10")
+  GT  <- geno(vcf)$GT
+
+  # --- Extract recombination alleles ---
+  rec       <- GT[, "CC010"]
+  rec_split <- do.call(rbind, strsplit(rec, "\\|", fixed = FALSE))
+  GT2 <- cbind(GT, CC010_a1 = rec_split[, 1], CC010_a2 = rec_split[, 2])
+  GT2 <- GT2[, colnames(GT2) != "CC010"]
+
+  # --- Reshape to long ---
+  GT2           <- as.data.frame(GT2)
+  GT2$locus_id  <- rownames(GT2)
+  GT2$chrom     <- as.character(seqnames(rowRanges(vcf)))
+  GT2$pos       <- start(rowRanges(vcf))
+  n_variants    <- nrow(GT2)
+
+  GT_long <- reshape2::melt(
+    GT2[sample(1:nrow(GT2), 50000), ],
+    id.vars      = c("locus_id", "chrom", "pos"),
+    variable.name = "SAMPLE", value.name = "GT"
+  )
+
+  # --- Allele counts ---
+  allele_counts <- apply(GT2[, 1:13], 1, function(X) length(unique(unlist(X))))
+  names(allele_counts) <- NULL
+  biallelic_loci <- GT2[allele_counts == 2, ]
+
+  # --- Stats ---
+  homozygous_fraction <- n_variants / n_variants   # kept as-is from original
+  biallelic_fraction  <- mean(allele_counts == 2)
+  n_biallelic         <- sum(allele_counts == 2)
+
+  # --- Plot: raw GT heatmap ---
+  p_heat <- ggplot(GT_long, aes(xmin = pos/1e6, xmax = 0.1 + pos/1e6, ymin = 0, ymax = 1, fill = GT)) +
+    geom_rect(color = NA) +
+    scale_fill_viridis_d(option = "turbo") +
+    facet_grid(SAMPLE ~ chrom) +
+    theme(strip.text.y = element_text(angle = 0),
+          axis.text.y = element_blank(), axis.ticks.y = element_blank())
+
+  # --- Plot: allele count histogram ---
+  p_allele <- ggplot(data.frame(allele_counts), aes(x = allele_counts)) +
+    geom_histogram(binwidth = 1, fill = "steelblue", color = "black") +
+    labs(title = "Distribution of allele counts per locus",
+         x = "Number of unique alleles", y = "Count of loci") +
+    theme_minimal() +
+    scale_x_continuous(breaks = seq(1, max(allele_counts), by = 1))
+
+  # --- Biallelic subset for heatmap ---
+  biallelic_loci_subset <- biallelic_loci[, c(
+    "129S1_SvImJ", "A_J", "CAST_EiJ_T2T_Keane", "C57BL_6_T2T_Yu",
+    "NOD_ShiLtJ", "NZO_HlLtJ", "PWK_PhJ", "WSB_EiJ",
+    "CC010_a1", "CC010_a2", "chrom", "pos"
+  )]
+
+  biallelic_long <- reshape2::melt(
+    biallelic_loci_subset[sample(1:nrow(biallelic_loci_subset), min(10000, nrow(biallelic_loci_subset))), ],
+    id.vars = c("chrom", "pos"), variable.name = "SAMPLE", value.name = "GT"
+  )
+
+  biallelic_long$SAMPLE <- dplyr::recode(biallelic_long$SAMPLE,
+    "A_J" = "A/J", "C57BL_6_T2T_Yu" = "C57BL/6J", "129S1_SvImJ" = "129S1/SvImJ",
+    "NOD_ShiLtJ" = "NOD/ShiLtJ", "NZO_HlLtJ" = "NZO/HlLtJ", "CAST_EiJ_T2T_Keane" = "CAST/EiJ",
+    "PWK_PhJ" = "PWK/PhJ", "WSB_EiJ" = "WSB/EiJ",
+    "CC010_a1" = "CC010 hap1", "CC010_a2" = "CC010 hap2"
+  )
+
+  biallelic_long$SAMPLE <- factor(biallelic_long$SAMPLE, levels = sample_levels)
+
+  hapl_plot_chr         <- hapl_plot_all %>% filter(chrom == chr)
+  hapl_plot_chr$SAMPLE  <- factor(hapl_plot_chr$SAMPLE, levels = sample_levels)
+  biallelic_long_chr    <- biallelic_long[biallelic_long$chrom == chr, ]
+  
+  # Founders are still called diploid, but are in fact haplod. Replace 0|0 and 1|1 with 0 and 1 for plotting.
+  biallelic_long_chr$GT <- ifelse(biallelic_long_chr$GT == "0|0", "0",
+                                  ifelse(biallelic_long_chr$GT == "1|1", "1", biallelic_long_chr$GT))
+  
+  # --- Plot: biallelic heatmap with expected founder haplotypes ---
+  p_biallelic <- ggplot() +
+    geom_rect(data = hapl_plot_chr,
+              aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = founder),
+              inherit.aes = FALSE, color = NA, alpha = 0.9) +
+    scale_fill_manual(values = founder_colors, name = "Expected Founder") +
+    ggnewscale::new_scale_fill() +
+    geom_rect(data = biallelic_long_chr,
+              aes(xmin = pos/1e6, xmax = 0.1 + pos/1e6, ymin = 0, ymax = 1, fill = GT),
+              color = NA) +
+    scale_fill_manual(values = c("0" = "grey90", "1" = "black"), name = "Allele") +
+    facet_grid(SAMPLE ~ chrom) +
+    theme(strip.text.y = element_text(angle = 0),
+          axis.text.y = element_blank(), axis.ticks.y = element_blank()) +
+    scale_x_continuous(expand = c(0, 0)) +
+    scale_y_continuous(expand = c(0, 0))
+  
+  # save p_biallelic as svg
+  ggsave(filename = sprintf("%s_biallelic_heatmap.svg", chr), plot = p_biallelic, width = 10, height = 4)
+  
+  results[[chr]] <- list(
+    p_heat              = p_heat,
+    p_allele            = p_allele,
+    p_biallelic         = p_biallelic,
+    homozygous_fraction = homozygous_fraction,
+    biallelic_fraction  = biallelic_fraction,
+    n_biallelic         = n_biallelic
+  )
+}
+```
+
+## Chromosome Analysis {.tabset}
+
+```{r tabs, results='asis', echo=FALSE}
+for (chr in chromosomes) {
+  out <- knitr::knit_child(
+    text = c(
+      paste0("### ", chr),
+      "",
+      paste0("`r sprintf('**Biallelic fraction:** %.4f | **N biallelic loci:** %d', results[['", chr, "']]$biallelic_fraction, results[['", chr, "']]$n_biallelic)`"),
+      "",
+      paste0("```{r ", chr, "-heat, echo=FALSE, fig.width=10, fig.height=4}"),
+      paste0("print(results[['", chr, "']]$p_heat)"),
+      "```",
+      "",
+      paste0("```{r ", chr, "-allele, echo=FALSE, fig.width=6, fig.height=3}"),
+      paste0("print(results[['", chr, "']]$p_allele)"),
+      "```",
+      "",
+      paste0("```{r ", chr, "-biallelic, echo=FALSE, fig.width=10, fig.height=4}"),
+      paste0("print(results[['", chr, "']]$p_biallelic)"),
+      "```",
+      ""
+    ),
+    envir = environment(),
+    quiet = TRUE
+  )
+  cat(out, sep = "\n")
+}
+```

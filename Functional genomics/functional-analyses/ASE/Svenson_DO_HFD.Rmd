@@ -1,0 +1,1004 @@
+---
+title: "Visualize Filtered Metrics"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+set.seed(0)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Pantranscriptome/Analyze_F1_RPVG_data_exploration/"))
+
+library(ggplot2)
+library(cowplot)
+library(scales)
+library("dplyr")
+library(factoextra)
+library(tidyr)
+source(file.path(REPO_ROOT, "shared-R", "CS_Aesthetic.R"))
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+library(ggrepel)
+library(gridExtra)
+library(reshape2)
+library(ggbeeswarm)
+
+library(ComplexUpset)
+library(dplyr)
+library(patchwork)
+library(data.table)
+```
+
+```{r import_data}
+# import Rds
+Svenson_DO_HFD_mrna <- readRDS("../dataset.mrna.Svenson_DO_HFD.v12.Rds")
+```
+
+```{r}
+# read GTF
+gtf <- fread(
+  "../../../DO_Striatum_RNAseq/Initial_test_rpvg_results/Mus_musculus.GRCm39.114.chr.gtf",
+  sep = "\t",
+  header = FALSE,
+  quote = "",
+  fill = TRUE,
+  comment.char = "#"
+)
+
+colnames(gtf) <- c(
+  "chr", "source", "feature", "start", "end",
+  "score", "strand", "frame", "attributes"
+)
+
+# keep only transcript rows
+gtf_tx <- gtf[feature == "transcript"]
+
+# extract transcript_id, gene_id, gene_name
+gtf_tx[, transcript_id := sub('.*transcript_id "([^"]+)".*', '\\1', attributes)]
+gtf_tx[, gene_id       := sub('.*gene_id "([^"]+)".*', '\\1', attributes)]
+gtf_tx[, gene_name     := sub('.*gene_name "([^"]+)".*', '\\1', attributes)]
+
+# keep one row per transcript
+tx2gene <- unique(
+  gtf_tx[, .(transcript_id, gene_id, gene_name)]
+)
+
+# strip transcript/gene version suffixes just in case
+tx2gene[, transcript_id_noversion := sub("\\..*$", "", transcript_id)]
+tx2gene[, gene_id_noversion       := sub("\\..*$", "", gene_id)]
+
+# read ASE table
+fread("JJ_high_prob_filtered_simplified.tsv") -> JJ_high_prob_filtered
+
+# read significant ASE results
+fread("DESeq2_ASE_significant_lfc1.txt") -> sig_res_df
+sig_tx <- unique(sig_res_df$Transcript_cluster)
+
+# restrict ASE table to significant transcripts only
+JJ_high_prob_filtered <- JJ_high_prob_filtered[
+  Transcript_cluster %in% sig_tx
+]
+
+# ASE transcript list
+ase_dt <- as.data.table(JJ_high_prob_filtered)
+
+ase_tx <- unique(
+  ase_dt[, .(Transcript_cluster)]
+)
+
+# strip version from ASE transcript IDs just in case
+ase_tx[, Transcript_cluster_noversion := sub("\\..*$", "", Transcript_cluster)]
+
+# map transcript -> gene
+ase_gene_map <- merge(
+  ase_tx,
+  tx2gene,
+  by.x = "Transcript_cluster_noversion",
+  by.y = "transcript_id_noversion",
+  all.x = TRUE
+)
+
+# prepare Svenson gene annotation
+annot_mrna <- as.data.table(Svenson_DO_HFD_mrna$annot.mrna)
+annot_mrna[, gene_id_noversion := sub("\\..*$", "", gene.id)]
+
+# join ASE transcripts to Svenson gene annotation
+ase_eqtl_annot <- merge(
+  ase_gene_map,
+  annot_mrna,
+  by = "gene_id_noversion",
+  all.x = TRUE
+)
+
+# keep only transcripts that mapped to a gene in the Svenson object
+ase_eqtl_annot_matched <- ase_eqtl_annot[!is.na(gene.id)]
+
+# keep one row per gene for gene-level annotation fields
+gene_annot_unique <- unique(
+  ase_eqtl_annot_matched[, .(
+    gene_id_noversion,
+    gene.id,
+    symbol,
+    chr,
+    start,
+    end,
+    strand,
+    middle,
+    nearest.marker.id
+  )]
+)
+
+# additive peak table
+lod_add <- as.data.table(Svenson_DO_HFD_mrna$lod.peaks$additive)
+lod_add[, gene_id_noversion := sub("\\..*$", "", gene.id)]
+lod_add[, marker_pos_bp := as.numeric(tstrsplit(marker.id, "_", fixed = TRUE)[[2]])]
+lod_add[, marker_pos_mb := marker_pos_bp / 1e6]
+
+lod_add_gene <- merge(
+  gene_annot_unique[, .(gene_id_noversion, middle)],
+  lod_add,
+  by = "gene_id_noversion",
+  all = FALSE
+)
+
+setorder(lod_add_gene, gene_id_noversion, -lod)
+
+lod_add_gene_summary <- lod_add_gene[, .(
+  additive_peak_marker.id = marker.id[1],
+  additive_peak_lod = lod[1],
+  additive_peak_distance_mb = abs(marker_pos_mb[1] - middle[1]),
+  additive_n_peaks = .N
+), by = gene_id_noversion]
+
+# diet interaction peak table
+lod_diet <- as.data.table(Svenson_DO_HFD_mrna$lod.peaks$diet_int)
+lod_diet[, gene_id_noversion := sub("\\..*$", "", gene.id)]
+lod_diet[, marker_pos_bp := as.numeric(tstrsplit(marker.id, "_", fixed = TRUE)[[2]])]
+lod_diet[, marker_pos_mb := marker_pos_bp / 1e6]
+
+lod_diet_gene <- merge(
+  gene_annot_unique[, .(gene_id_noversion, middle)],
+  lod_diet,
+  by = "gene_id_noversion",
+  all = FALSE
+)
+
+setorder(lod_diet_gene, gene_id_noversion, -lod)
+
+lod_diet_gene_summary <- lod_diet_gene[, .(
+  diet_int_peak_marker.id = marker.id[1],
+  diet_int_peak_lod = lod[1],
+  diet_int_peak_distance_mb = abs(marker_pos_mb[1] - middle[1]),
+  diet_int_n_peaks = .N
+), by = gene_id_noversion]
+
+# sex interaction peak table
+lod_sex <- as.data.table(Svenson_DO_HFD_mrna$lod.peaks$sex_int)
+lod_sex[, gene_id_noversion := sub("\\..*$", "", gene.id)]
+lod_sex[, marker_pos_bp := as.numeric(tstrsplit(marker.id, "_", fixed = TRUE)[[2]])]
+lod_sex[, marker_pos_mb := marker_pos_bp / 1e6]
+
+lod_sex_gene <- merge(
+  gene_annot_unique[, .(gene_id_noversion, middle)],
+  lod_sex,
+  by = "gene_id_noversion",
+  all = FALSE
+)
+
+setorder(lod_sex_gene, gene_id_noversion, -lod)
+
+lod_sex_gene_summary <- lod_sex_gene[, .(
+  sex_int_peak_marker.id = marker.id[1],
+  sex_int_peak_lod = lod[1],
+  sex_int_peak_distance_mb = abs(marker_pos_mb[1] - middle[1]),
+  sex_int_n_peaks = .N
+), by = gene_id_noversion]
+
+# merge gene-level summaries back onto transcript-level table
+ase_eqtl_summary <- merge(
+  ase_eqtl_annot_matched,
+  lod_add_gene_summary,
+  by = "gene_id_noversion",
+  all.x = TRUE
+)
+
+ase_eqtl_summary <- merge(
+  ase_eqtl_summary,
+  lod_diet_gene_summary,
+  by = "gene_id_noversion",
+  all.x = TRUE
+)
+
+ase_eqtl_summary <- merge(
+  ase_eqtl_summary,
+  lod_sex_gene_summary,
+  by = "gene_id_noversion",
+  all.x = TRUE
+)
+
+# keep one row per transcript
+ase_eqtl_summary <- unique(
+  ase_eqtl_summary[, .(
+    Transcript_cluster,
+    transcript_id,
+    gene_id,
+    gene_name,
+    symbol,
+    chr,
+    start,
+    end,
+    strand,
+    middle,
+    nearest.marker.id,
+    additive_peak_marker.id,
+    additive_peak_lod,
+    additive_peak_distance_mb,
+    additive_n_peaks,
+    diet_int_peak_marker.id,
+    diet_int_peak_lod,
+    diet_int_peak_distance_mb,
+    diet_int_n_peaks,
+    sex_int_peak_marker.id,
+    sex_int_peak_lod,
+    sex_int_peak_distance_mb,
+    sex_int_n_peaks
+  )]
+)
+
+setorder(ase_eqtl_summary, Transcript_cluster)
+
+# diagnostics
+ase_mapping_summary <- data.table(
+  metric = c(
+    "ASE transcripts",
+    "Mapped to GTF transcript",
+    "Mapped to Svenson gene annotation",
+    "Genes with additive peak",
+    "Genes with diet interaction peak",
+    "Genes with sex interaction peak"
+  ),
+  count = c(
+    nrow(ase_tx),
+    sum(!is.na(ase_gene_map$gene_id)),
+    nrow(ase_eqtl_annot_matched),
+    sum(!is.na(ase_eqtl_summary$additive_peak_lod)),
+    sum(!is.na(ase_eqtl_summary$diet_int_peak_lod)),
+    sum(!is.na(ase_eqtl_summary$sex_int_peak_lod))
+  )
+)
+
+ase_mapping_summary[, fraction := count / nrow(ase_tx)]
+
+ase_mapping_summary
+head(ase_eqtl_summary)
+```
+
+```{r}
+load("../core.Svenson_DO_HFD.v12.Rdata")-> core_Svenson_DO_HFD
+```
+
+```{r}
+# inspect core objects properly
+class(genoprobs)
+class(K)
+class(map)
+class(markers)
+
+length(genoprobs)
+length(K)
+length(map)
+
+names(genoprobs)[1:5]
+names(K)[1:5]
+names(map)[1:5]
+
+# inspect first chromosome objects
+dim(genoprobs[[1]])
+dim(K[[1]])
+length(map[[1]])
+
+# dimnames of genoprobs[[1]]
+lapply(dimnames(genoprobs[[1]]), head)
+
+# first kinship matrix sample IDs
+rownames(K[[1]])[1:10]
+colnames(K[[1]])[1:10]
+
+# expression sample IDs
+rownames(Svenson_DO_HFD_mrna$data$norm)[1:10]
+
+# sample overlap checks
+sum(rownames(Svenson_DO_HFD_mrna$data$norm) %in% rownames(K[[1]]))
+sum(rownames(K[[1]]) %in% rownames(Svenson_DO_HFD_mrna$data$norm))
+
+sum(rownames(Svenson_DO_HFD_mrna$data$norm) %in% dimnames(genoprobs[[1]])[[1]])
+sum(dimnames(genoprobs[[1]])[[1]] %in% rownames(Svenson_DO_HFD_mrna$data$norm))
+
+# look at the samples that overlap
+intersect(
+  rownames(Svenson_DO_HFD_mrna$data$norm),
+  rownames(K[[1]])
+)[1:20]
+
+intersect(
+  rownames(Svenson_DO_HFD_mrna$data$norm),
+  dimnames(genoprobs[[1]])[[1]]
+)[1:20]
+```
+
+
+```{r}
+library(qtl2)
+fread("Founders-pantranscriptome-info.tsv") -> Founders_info
+
+# choose one transcript to test
+transcript_to_test <- "ENSMUST00000059091"
+
+subset(sig_res_df, Transcript_cluster == transcript_to_test)
+subset(Founders_info, Transcripts == transcript_to_test)
+
+# pull the transcript/gene summary row
+test_row <- ase_eqtl_summary[Transcript_cluster == transcript_to_test][1]
+
+if (nrow(test_row) == 0) {
+  stop("transcript_to_test was not found in ase_eqtl_summary")
+}
+
+chr_use <- as.character(test_row$chr)
+marker_use <- test_row$nearest.marker.id
+gene_use <- test_row$gene_id
+
+# expression vector for this gene
+pheno_use <- Svenson_DO_HFD_mrna$data$norm[, gene_use]
+
+# subset to mice shared between expression, genoprobs, and kinship
+common_ids <- Reduce(
+  intersect,
+  list(
+    names(pheno_use),
+    dimnames(genoprobs[[chr_use]])[[1]],
+    rownames(K[[chr_use]])
+  )
+)
+
+pheno_use <- pheno_use[common_ids]
+addcovar_use <- as.matrix(Svenson_DO_HFD_mrna$covar.matrix[common_ids, , drop = FALSE])
+kinship_use <- K[[chr_use]][common_ids, common_ids, drop = FALSE]
+
+# keep genoprobs as a one-chromosome calc_genoprob object
+genoprobs_use <- genoprobs[common_ids, chr_use]
+
+# calculate founder coefficients across the chromosome
+coef_chr <- scan1coef(
+  genoprobs = genoprobs_use,
+  pheno = pheno_use,
+  kinship = kinship_use,
+  addcovar = addcovar_use
+)
+
+# inspect available positions
+head(rownames(coef_chr))
+
+# extract coefficients at the nearest marker
+if (!(marker_use %in% rownames(coef_chr))) {
+  stop(paste("Nearest marker", marker_use, "not found in coef_chr rownames"))
+}
+
+coef_at_marker <- data.table(
+  founder = colnames(coef_chr),
+  coefficient = as.numeric(coef_chr[marker_use, ])
+)
+
+coef_at_marker <- coef_at_marker[order(-coefficient)]
+
+test_row
+coef_at_marker
+```
+
+```{r}
+library(data.table)
+
+# map qtl2 founder codes to DO founder strain names
+founder_key <- data.table(
+  founder = c("A","B","C","D","E","F","G","H"),
+  founder_strain = c(
+    "A/J",
+    "C57BL/6J",
+    "129S1/SvImJ",
+    "NOD/ShiLtJ",
+    "NZO/HlLtJ",
+    "CAST/EiJ",
+    "PWK/PhJ",
+    "WSB/EiJ"
+  )
+)
+
+# keep only founder-effect rows
+coef_founders <- merge(
+  coef_at_marker[founder %in% founder_key$founder],
+  founder_key,
+  by = "founder",
+  all.x = TRUE
+)
+
+# order from highest to lowest coefficient
+setorder(coef_founders, -coefficient)
+
+coef_founders
+
+# example contrast: CAST/EiJ minus A/J
+cast_minus_aj <- coef_founders[founder == "F", coefficient] -
+                 coef_founders[founder == "A", coefficient]
+
+cast_minus_aj_dt <- data.table(
+  transcript = transcript_to_test,
+  gene_id = gene_use,
+  marker = marker_use,
+  founder_1 = "CAST/EiJ",
+  founder_2 = "A/J",
+  coefficient_1 = coef_founders[founder == "F", coefficient],
+  coefficient_2 = coef_founders[founder == "A", coefficient],
+  delta = cast_minus_aj
+)
+
+cast_minus_aj_dt
+```
+
+```{r}
+# coefficients for all ASE transcripts at the nearest marker only
+# using rz so the coefficients match the browser
+
+library(qtl2)
+library(data.table)
+
+coef_targets <- unique(
+  ase_eqtl_summary[!is.na(gene_id) & !is.na(chr) & !is.na(nearest.marker.id), .(
+    Transcript_cluster,
+    gene_id,
+    chr = as.character(chr),
+    marker = nearest.marker.id
+  )]
+)
+
+# cache shared objects by chromosome so they are not rebuilt every iteration
+chr_levels <- sort(unique(coef_targets$chr))
+chr_cache <- vector("list", length(chr_levels))
+names(chr_cache) <- chr_levels
+
+for (chr_i in chr_levels) {
+  common_ids <- Reduce(
+    intersect,
+    list(
+      rownames(Svenson_DO_HFD_mrna$data$rz),
+      dimnames(genoprobs[[chr_i]])[[1]],
+      rownames(K[[chr_i]])
+    )
+  )
+
+  chr_cache[[chr_i]] <- list(
+    common_ids = common_ids,
+    addcovar_use = as.matrix(Svenson_DO_HFD_mrna$covar.matrix[common_ids, , drop = FALSE]),
+    kinship_use = K[[chr_i]][common_ids, common_ids, drop = FALSE],
+    genoprobs_use = genoprobs[common_ids, chr_i]
+  )
+}
+
+coef_list <- vector("list", nrow(coef_targets))
+
+for (i in seq_len(nrow(coef_targets))) {
+  transcript_use <- coef_targets$Transcript_cluster[i]
+  gene_use <- coef_targets$gene_id[i]
+  chr_use <- coef_targets$chr[i]
+  marker_use <- coef_targets$marker[i]
+
+  common_ids <- chr_cache[[chr_use]]$common_ids
+  addcovar_use <- chr_cache[[chr_use]]$addcovar_use
+  kinship_use <- chr_cache[[chr_use]]$kinship_use
+  genoprobs_use <- chr_cache[[chr_use]]$genoprobs_use
+
+  pheno_use <- Svenson_DO_HFD_mrna$data$rz[common_ids, gene_use]
+
+  # pull genotype probabilities for exactly one marker
+  genoprob_at_marker <- pull_genoprobpos(
+    genoprobs = genoprobs_use,
+    marker = marker_use
+  )
+
+  fit_out <- fit1(
+    genoprobs = genoprob_at_marker,
+    pheno = pheno_use,
+    kinship = kinship_use,
+    addcovar = addcovar_use
+  )
+
+  coef_dt <- data.table(
+    Transcript_cluster = transcript_use,
+    gene_id = gene_use,
+    chr = chr_use,
+    marker = marker_use,
+    marker_bp = as.numeric(sub("^[^_]+_", "", marker_use)),
+    term = names(fit_out$coef),
+    coefficient = as.numeric(fit_out$coef),
+    fit_lod = unname(fit_out$lod)
+  )
+
+  coef_dt <- coef_dt[term %in% c("intercept","A","B","C","D","E","F","G","H")]
+
+  intercept_value <- coef_dt[term == "intercept", coefficient][1]
+  coef_dt[, intercept := intercept_value]
+  coef_dt[, predicted_value := ifelse(term == "intercept", intercept, intercept + coefficient)]
+
+  coef_list[[i]] <- coef_dt
+
+  if (i %% 500 == 0) {
+    cat("Processed", i, "of", nrow(coef_targets), "transcripts\n")
+  }
+}
+
+coef_all <- rbindlist(coef_list, use.names = TRUE, fill = TRUE)
+
+head(coef_all)
+```
+
+```{r}
+# join transcript-specific haplotype identities to founder coefficients
+# keep only rows that are valid and resolvable for coefficient comparison
+
+library(data.table)
+
+peak_window_mb <- 1
+ase_ratio_pseudocount <- 0.5
+
+pair_string <- function(a, b) {
+  if (is.na(a) || is.na(b)) return(NA_character_)
+  paste(sort(c(a, b)), collapse = "/")
+}
+
+parse_founder_set <- function(x) {
+  if (is.na(x) || x == "") return(character(0))
+  unique(trimws(unlist(strsplit(x, "/", fixed = TRUE))))
+}
+
+make_valid_pairs <- function(parent1_codes, parent2_codes) {
+  parent1_codes <- sort(unique(parent1_codes[!is.na(parent1_codes)]))
+  parent2_codes <- sort(unique(parent2_codes[!is.na(parent2_codes)]))
+
+  if (length(parent1_codes) == 0 || length(parent2_codes) == 0) {
+    return(character(0))
+  }
+
+  pairs <- expand.grid(parent1_codes, parent2_codes, stringsAsFactors = FALSE)
+  unique(mapply(pair_string, pairs[[1]], pairs[[2]]))
+}
+
+resolve_oriented_assignment <- function(founder_1_candidates_str,
+                                        founder_2_candidates_str,
+                                        parent1_founders,
+                                        parent2_founders) {
+  cand1 <- parse_founder_set(founder_1_candidates_str)
+  cand2 <- parse_founder_set(founder_2_candidates_str)
+  p1 <- parse_founder_set(parent1_founders)
+  p2 <- parse_founder_set(parent2_founders)
+
+  valid_pairs <- make_valid_pairs(p1, p2)
+
+  if (length(cand1) == 0 || length(cand2) == 0 || length(valid_pairs) == 0) {
+    return(list(
+      founder_1_code = NA_character_,
+      founder_2_code = NA_character_,
+      n_oriented_assignments = 0L,
+      oriented_assignments = NA_character_,
+      coef_comparable = FALSE
+    ))
+  }
+
+  oriented <- CJ(founder_1_code = cand1, founder_2_code = cand2, unique = TRUE)
+  oriented[, unordered_pair := mapply(pair_string, founder_1_code, founder_2_code)]
+  oriented <- oriented[unordered_pair %in% valid_pairs]
+
+  if (nrow(oriented) == 0) {
+    return(list(
+      founder_1_code = NA_character_,
+      founder_2_code = NA_character_,
+      n_oriented_assignments = 0L,
+      oriented_assignments = NA_character_,
+      coef_comparable = FALSE
+    ))
+  }
+
+  oriented_assignments <- paste(
+    paste(oriented$founder_1_code, oriented$founder_2_code, sep = "/"),
+    collapse = ";"
+  )
+
+  if (nrow(oriented) == 1) {
+    return(list(
+      founder_1_code = oriented$founder_1_code[1],
+      founder_2_code = oriented$founder_2_code[1],
+      n_oriented_assignments = 1L,
+      oriented_assignments = oriented_assignments,
+      coef_comparable = TRUE
+    ))
+  }
+
+  return(list(
+    founder_1_code = NA_character_,
+    founder_2_code = NA_character_,
+    n_oriented_assignments = nrow(oriented),
+    oriented_assignments = oriented_assignments,
+    coef_comparable = FALSE
+  ))
+}
+
+# keep only founder rows from coef_all and standardize founder names
+qtl2_founder_key <- data.table(
+  founder_code = c("A","B","C","D","E","F","G","H"),
+  founder_strain = c(
+    "A/J",
+    "C57BL/6J",
+    "129S1/SvImJ",
+    "NOD/ShiLtJ",
+    "NZO/HlLtJ",
+    "CAST/EiJ",
+    "PWK/PhJ",
+    "WSB/EiJ"
+  )
+)
+
+coef_all_std <- merge(
+  coef_all[
+    term %in% c("A","B","C","D","E","F","G","H"),
+    .(Transcript_cluster, gene_id, chr, marker, marker_bp, fit_lod, founder_code = term, coefficient)
+  ],
+  qtl2_founder_key,
+  by = "founder_code",
+  all.x = TRUE
+)
+
+# read permissive parental mosaic validation table from previous ELN step
+mosaic_check_dt <- fread("Significant_ASE_vs_parental_mosaic_check_permissiveHST.txt")
+
+# keep only significant transcripts already defined upstream and only valid HST-pair rows
+mosaic_check_dt <- mosaic_check_dt[
+  Transcript_cluster %in% sig_tx &
+  Sample %in% c("JJ013", "JJ014") &
+  hst_pair_valid == TRUE
+]
+
+# resolve actual founder assignments for coefficient comparison
+resolved_list <- vector("list", nrow(mosaic_check_dt))
+
+for (i in seq_len(nrow(mosaic_check_dt))) {
+  resolved <- resolve_oriented_assignment(
+    founder_1_candidates_str = mosaic_check_dt$founder_1_candidates_str[i],
+    founder_2_candidates_str = mosaic_check_dt$founder_2_candidates_str[i],
+    parent1_founders = mosaic_check_dt$parent1_founders[i],
+    parent2_founders = mosaic_check_dt$parent2_founders[i]
+  )
+
+  resolved_list[[i]] <- data.table(
+    Transcript_cluster = mosaic_check_dt$Transcript_cluster[i],
+    Sample = mosaic_check_dt$Sample[i],
+    founder_1_code = resolved$founder_1_code,
+    founder_2_code = resolved$founder_2_code,
+    n_oriented_assignments = resolved$n_oriented_assignments,
+    oriented_assignments = resolved$oriented_assignments,
+    coef_comparable = resolved$coef_comparable
+  )
+}
+
+resolved_dt <- rbindlist(resolved_list, use.names = TRUE, fill = TRUE)
+
+# ASE rows
+ase_rows <- fread("JJ_high_prob_filtered_simplified.tsv")
+ase_rows <- ase_rows[
+  Transcript_cluster %in% sig_tx &
+  Sample %in% c("JJ013", "JJ014")
+]
+
+# attach permissive HST validation fields
+ase_rows <- merge(
+  ase_rows,
+  mosaic_check_dt[, .(
+    Transcript_cluster,
+    Sample,
+    founder_1_candidates_str,
+    founder_2_candidates_str,
+    founder_1_n_candidates,
+    founder_2_n_candidates,
+    parent1_founders,
+    parent2_founders,
+    valid_f1_pairs,
+    hst_pair_valid
+  )],
+  by = c("Transcript_cluster", "Sample"),
+  all.x = TRUE
+)
+
+# attach resolved founder assignments for coefficient comparison
+ase_rows <- merge(
+  ase_rows,
+  resolved_dt,
+  by = c("Transcript_cluster", "Sample"),
+  all.x = TRUE
+)
+
+# keep only rows valid for coefficient comparison
+ase_rows <- ase_rows[coef_comparable == TRUE]
+
+# attach coefficient for founder 1
+ase_rows <- merge(
+  ase_rows,
+  coef_all_std[, .(
+    Transcript_cluster,
+    gene_id,
+    chr,
+    marker,
+    marker_bp,
+    fit_lod,
+    founder_1_code = founder_code,
+    coef_1 = coefficient
+  )],
+  by = c("Transcript_cluster", "founder_1_code"),
+  all.x = TRUE
+)
+
+# attach coefficient for founder 2
+ase_rows <- merge(
+  ase_rows,
+  coef_all_std[, .(
+    Transcript_cluster,
+    founder_2_code = founder_code,
+    coef_2 = coefficient
+  )],
+  by = c("Transcript_cluster", "founder_2_code"),
+  all.x = TRUE
+)
+
+# add additive peak information from ase_eqtl_summary
+ase_rows <- merge(
+  ase_rows,
+  ase_eqtl_summary[, .(
+    Transcript_cluster,
+    nearest.marker.id,
+    additive_peak_marker.id,
+    additive_peak_lod,
+    additive_peak_distance_mb,
+    additive_n_peaks
+  )],
+  by = "Transcript_cluster",
+  all.x = TRUE
+)
+
+ase_rows[, additive_peak_marker_bp := as.numeric(sub("^[^_]+_", "", additive_peak_marker.id))]
+
+# checks on whether grabbed marker is top LOD marker or near it
+ase_rows[, marker_is_top_additive_peak := !is.na(additive_peak_marker.id) & marker == additive_peak_marker.id]
+ase_rows[, marker_to_top_additive_peak_mb := abs(marker_bp - additive_peak_marker_bp) / 1e6]
+ase_rows[, marker_near_top_additive_peak := !is.na(marker_to_top_additive_peak_mb) & marker_to_top_additive_peak_mb <= peak_window_mb]
+
+# founder-side pairwise contrast
+ase_rows[, predicted_coef_delta := coef_1 - coef_2]
+
+# ASE-side pairwise contrast on an unbounded scale using ReadCount
+ase_rows[, ase_log2_ratio := log2((ReadCount_1 + ase_ratio_pseudocount) / (ReadCount_2 + ase_ratio_pseudocount))]
+
+# sign comparison
+ase_rows[, ase_sign := sign(ase_log2_ratio)]
+ase_rows[, coef_sign := sign(predicted_coef_delta)]
+ase_rows[, sign_concordant := fifelse(
+  is.na(ase_sign) | is.na(coef_sign),
+  NA,
+  ase_sign == coef_sign
+)]
+
+# clean output
+ase_coef_comparison <- ase_rows[, .(
+  Transcript_cluster,
+  Sample,
+  gene_id,
+  chr,
+  marker,
+  marker_bp,
+  fit_lod,
+  nearest.marker.id,
+  additive_peak_marker.id,
+  additive_peak_marker_bp,
+  additive_peak_lod,
+  additive_peak_distance_mb,
+  additive_n_peaks,
+  marker_is_top_additive_peak,
+  marker_to_top_additive_peak_mb,
+  marker_near_top_additive_peak,
+  Name_1,
+  Name_2,
+  founder_1_candidates_str,
+  founder_2_candidates_str,
+  parent1_founders,
+  parent2_founders,
+  valid_f1_pairs,
+  hst_pair_valid,
+  n_oriented_assignments,
+  oriented_assignments,
+  founder_1_code,
+  founder_2_code,
+  ReadCount_1,
+  ReadCount_2,
+  TPM_1,
+  TPM_2,
+  TPM_sum,
+  TPM_diff_ratio,
+  ase_log2_ratio,
+  coef_1,
+  coef_2,
+  predicted_coef_delta,
+  ase_sign,
+  coef_sign,
+  sign_concordant
+)]
+
+ase_coef_summary <- ase_coef_comparison[, .(
+  n_rows = .N,
+  n_with_both_coefs = sum(!is.na(coef_1) & !is.na(coef_2)),
+  frac_with_both_coefs = sum(!is.na(coef_1) & !is.na(coef_2)) / .N,
+  n_sign_concordant = sum(sign_concordant, na.rm = TRUE),
+  frac_sign_concordant = sum(sign_concordant, na.rm = TRUE) / sum(!is.na(sign_concordant)),
+  n_marker_is_top_additive_peak = sum(marker_is_top_additive_peak, na.rm = TRUE),
+  frac_marker_is_top_additive_peak = sum(marker_is_top_additive_peak, na.rm = TRUE) / .N,
+  n_marker_near_top_additive_peak = sum(marker_near_top_additive_peak, na.rm = TRUE),
+  frac_marker_near_top_additive_peak = sum(marker_near_top_additive_peak, na.rm = TRUE) / .N
+)]
+
+ase_coef_summary
+head(ase_coef_comparison)
+```
+
+```{r plot_comparison of ASE log2 ratio vs predicted coefficient delta, fig.width=4, fig.height=4}
+# plot ASE log2 ratio vs predicted coefficient delta for rows with both coefficients available
+ggplot(
+  ase_coef_comparison[!is.na(coef_1) & !is.na(coef_2)],
+  aes(x = predicted_coef_delta, y = ase_log2_ratio)
+) +
+  geom_point(alpha = 0.5, stroke = 0, size = 0.75) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(
+    title = "Predicted Founder Coefficient\nDelta vs ASE log2 Ratio",
+    x = "Predicted Founder Coefficient Delta\n(Founder 1 - Founder 2)",
+    y = "ASE log2 Ratio\nlog2((ReadCount_1 + 0.5) / (ReadCount_2 + 0.5))"
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  theme_cowplot()
+```
+
+```{r}
+# plot ase_sign vs coef_sign for rows with both signs available as a true heatmap
+plot_dt <- as.data.table(
+  ase_coef_comparison[!is.na(ase_sign) & !is.na(coef_sign)]
+)[
+  ,
+  .N,
+  by = .(coef_sign, ase_sign)
+]
+
+# include all sign combinations so empty cells are shown
+all_signs <- c(-1, 0, 1)
+plot_dt <- merge(
+  CJ(coef_sign = all_signs, ase_sign = all_signs),
+  plot_dt,
+  by = c("coef_sign", "ase_sign"),
+  all.x = TRUE
+)
+
+plot_dt[is.na(N), N := 0]
+
+plot_dt[, coef_sign := factor(coef_sign, levels = c(-1, 0, 1))]
+plot_dt[, ase_sign := factor(ase_sign, levels = c(-1, 0, 1))]
+
+ggplot(plot_dt, aes(x = coef_sign, y = ase_sign, fill = N)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = N), size = 4) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(
+    title = "Sign Concordance Between ASE and Predicted Coefficients",
+    x = "Predicted Coefficient Sign",
+    y = "ASE log2 Ratio Sign",
+    fill = "Count"
+  ) +
+  theme_cowplot()
+```
+
+
+```{r}
+transcript_coef_summary <- ase_coef_comparison[, .(
+  n_samples = .N,
+  both_coefs_all_samples = all(!is.na(coef_1) & !is.na(coef_2)),
+  sign_concordant_all_samples = all(sign_concordant %in% TRUE),
+  marker_is_top_additive_peak = first(marker_is_top_additive_peak),
+  marker_near_top_additive_peak = first(marker_near_top_additive_peak)
+), by = Transcript_cluster]
+
+transcript_coef_summary[, .(
+  n_transcripts = .N,
+  n_both_coefs_all_samples = sum(both_coefs_all_samples),
+  frac_both_coefs_all_samples = sum(both_coefs_all_samples) / .N,
+  n_sign_concordant_all_samples = sum(sign_concordant_all_samples, na.rm = TRUE),
+  frac_sign_concordant_all_samples = sum(sign_concordant_all_samples, na.rm = TRUE) / sum(!is.na(sign_concordant_all_samples)),
+  n_marker_is_top_additive_peak = sum(marker_is_top_additive_peak, na.rm = TRUE),
+  frac_marker_is_top_additive_peak = sum(marker_is_top_additive_peak, na.rm = TRUE) / .N,
+  n_marker_near_top_additive_peak = sum(marker_near_top_additive_peak, na.rm = TRUE),
+  frac_marker_near_top_additive_peak = sum(marker_near_top_additive_peak, na.rm = TRUE) / .N
+)]
+```
+
+```{r plot_comparison of ASE TPM difference ratio vs predicted coefficient delta, fig.width=4, fig.height=4}
+# plot TPM_diff_ratio vs predicted_coef_delta for rows with both coefficients available
+ggplot(ase_coef_comparison[!is.na(coef_1) & !is.na(coef_2)], aes(x = predicted_coef_delta, y = TPM_diff_ratio)) +
+  geom_point(alpha = 0.5, stroke=0, size=0.75) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(
+    title = "Predicted Founder Coefficient\nDelta vs ASE TPM Difference Ratio",
+    x = "Predicted Founder Coefficient Delta\n(Founder 1 - Founder 2)",
+    y = "ASE TPM Difference Ratio\n(TPM_1 - TPM_2) / (TPM_1 + TPM_2)"
+  ) +
+  theme_minimal() +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  theme_cowplot()
+```
+
+```{r}
+# plot ase_sign vs coef_sign for rows with both signs available as a true heatmap
+plot_dt <- as.data.table(
+  ase_coef_comparison[!is.na(ase_sign) & !is.na(coef_sign)]
+)[
+  ,
+  .N,
+  by = .(coef_sign, ase_sign)
+]
+
+# include all sign combinations so empty cells are shown
+all_signs <- c(-1, 0, 1)
+plot_dt <- merge(
+  CJ(coef_sign = all_signs, ase_sign = all_signs),
+  plot_dt,
+  by = c("coef_sign", "ase_sign"),
+  all.x = TRUE
+)
+
+plot_dt[is.na(N), N := 0]
+
+plot_dt[, coef_sign := factor(coef_sign, levels = c(-1, 0, 1))]
+plot_dt[, ase_sign := factor(ase_sign, levels = c(-1, 0, 1))]
+
+ggplot(plot_dt, aes(x = coef_sign, y = ase_sign, fill = N)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = N), size = 4) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue") +
+  labs(
+    title = "Sign Concordance Between ASE and Predicted Coefficients",
+    x = "Predicted Coefficient Sign",
+    y = "ASE TPM Difference Sign",
+    fill = "Count"
+  ) +
+  theme_cowplot()
+```
+
+```{r}
+# save ase_coef_comparison
+fwrite(
+  ase_coef_comparison,
+  "ASE_vs_Predicted_Coefficient_Comparison.tsv",
+  sep = "\t"
+)
+```

@@ -1,0 +1,217 @@
+import os
+
+shell.executable("/bin/bash")
+shell.prefix("set -eo pipefail; mkdir -p logs/job_ids; ")
+
+configfile: "config.yaml"
+
+BAM = os.path.basename(config["bam"])
+SAMPLE = os.path.splitext(BAM)[0]
+RGS = list(config["read_groups"].keys())
+
+wildcard_constraints:
+    sample=SAMPLE,
+    rg="|".join([r.replace("-", "\\-") for r in RGS])
+
+localrules: all, check_jobs
+
+
+rule all:
+    input:
+        expand("{rg}.accuracy_table.tsv", rg=RGS),
+        expand(SAMPLE + ".{rg}.bed.gz", rg=RGS),
+        "logs/job_efficiency_report.txt"
+
+
+rule bam_to_bed:
+    """BAM → per-RG BED with source coords, mapped coords, short name, mapq, strand, rg, flag, md"""
+    input:
+        bam=BAM
+    output:
+        beds=expand(SAMPLE + ".{rg}.bed", rg=RGS)
+    params:
+        prefix=SAMPLE
+    resources:
+        mem_mb=8000,
+        cpus_per_task=1
+    shell:
+        """
+        # spack load lines name the builds used in the original analysis (tool@version/build-hash); load the same versions however you install software.
+        eval $(spack load --sh {config[spack][samtools]})
+        samtools view {input.bam} | awk -F'\\t' -v prefix="{params.prefix}" 'BEGIN{{OFS="\\t"}} {{
+            rg="NA"; md="NA"
+            for(i=12;i<=NF;i++) {{
+                if($i ~ /^RG:Z:/) rg=substr($i,6)
+                else if($i ~ /^MD:Z:/) md=substr($i,6)
+            }}
+            n=split($1, a, "_")
+            orig_chr=a[1]"_"a[2]
+            orig_start=a[3]
+            orig_end=a[4]
+            short=a[1]"_"a[2]"_"a[3]"_"a[4]
+            print orig_chr, orig_start, orig_end, $3, $4-1, $4+length($10)-1, short, $5, ($2 == 16 ? "-" : "+"), rg, $2, md > (prefix "." rg ".bed")
+        }}'
+        for f in {output.beds}; do touch "$f"; done
+        echo $SLURM_JOB_ID > logs/job_ids/bam_to_bed.jobid
+        """
+
+
+rule refract_liftover:
+    """Liftover per-RG source coordinates to reference space"""
+    input:
+        bed="{sample}.{rg}.bed",
+        paf_index=lambda wildcards: config["read_groups"][wildcards.rg]
+    output:
+        refract="{sample}.{rg}.refract"
+    params:
+        refract_bin=config["refract"]["bin"],
+        q=config["refract"]["q"],
+        l=config["refract"]["l"],
+        d=config["refract"]["d"]
+    resources:
+        mem_mb=16000,
+        cpus_per_task=1
+    shell:
+        """
+        eval $(spack load --sh {config[spack][gcc]})
+        {params.refract_bin} liftover --index {input.paf_index} \
+            -q {params.q} -l {params.l} -d {params.d} \
+            {input.bed} > {output.refract}
+        echo $SLURM_JOB_ID > logs/job_ids/refract_liftover.{wildcards.rg}.jobid
+        """
+
+
+rule make_intermediates:
+    """Split into mapped/unmapped and build deduplicated liftover BED"""
+    input:
+        bed=SAMPLE + ".{rg}.bed",
+        refract=SAMPLE + ".{rg}.refract"
+    output:
+        mapped="{rg}.mapped.bed",
+        unmapped="{rg}.unmapped.bed",
+        liftover="{rg}.liftover.bed"
+    resources:
+        mem_mb=4000,
+        cpus_per_task=1
+    shell:
+        """
+        awk -F'\\t' 'BEGIN{{OFS="\\t"}} $4 == "*" {{next}} {{print $4, $5, $6, $7, $8}}' \
+            {input.bed} > {output.mapped}
+        awk -F'\\t' 'BEGIN{{OFS="\\t"}} $4 == "*" {{print}}' \
+            {input.bed} > {output.unmapped}
+        awk -F'\\t' 'BEGIN{{OFS="\\t"}} {{sub(/_t[0-9]+$/, "", $4); print $1, $2, $3, $4}}' \
+            {input.refract} | sort -u > {output.liftover}
+        echo $SLURM_JOB_ID > logs/job_ids/make_intermediates.{wildcards.rg}.jobid
+        """
+
+
+rule bedtools_intersect:
+    """Intersect mapped positions with lifted-over source intervals"""
+    input:
+        mapped="{rg}.mapped.bed",
+        liftover="{rg}.liftover.bed"
+    output:
+        accurate="{rg}.accurate.txt"
+    resources:
+        mem_mb=8000,
+        cpus_per_task=1
+    shell:
+        """
+        eval $(spack load --sh {config[spack][bedtools]})
+        bedtools intersect -a {input.mapped} -b {input.liftover} -wa -wb \
+            | awk -F'\\t' '$4 == $9' > {output.accurate}
+        echo $SLURM_JOB_ID > logs/job_ids/bedtools_intersect.{wildcards.rg}.jobid
+        """
+
+
+rule stratified_table:
+    """Generate accuracy table stratified by MAPQ bins"""
+    input:
+        bed=SAMPLE + ".{rg}.bed",
+        liftover="{rg}.liftover.bed",
+        accurate="{rg}.accurate.txt"
+    output:
+        table="{rg}.accuracy_table.tsv"
+    resources:
+        mem_mb=8000,
+        cpus_per_task=1
+    shell:
+        """
+        awk -F'\\t' 'BEGIN{{OFS="\\t"}}
+        FILENAME==ARGV[1] {{lifted[$1]=1; next}}
+        FILENAME==ARGV[2] {{key=$1 FS $2 FS $3 FS $4 FS $5; acc[key]=1; next}}
+        {{
+            n=split($7, a, "_")
+            short=a[1]"_"a[2]"_"a[3]"_"a[4]
+
+            if($4=="*") {{unmapped["NA"]++; total["NA"]++; next}}
+
+            mq=$8+0
+            if(mq==0) bin="0"
+            else if(mq<10) bin="1-9"
+            else if(mq<30) bin="10-29"
+            else if(mq<60) bin="30-59"
+            else bin="60"
+
+            total[bin]++
+            if(short in lifted) {{
+                lift[bin]++
+                key=$4 FS $5 FS $6 FS short FS $8
+                if(key in acc) accn[bin]++
+            }}
+        }}
+        END {{
+            print "rg\\tmapq_bin\\ttotal\\tunmapped\\tlifted\\taccurate"
+            split("NA,0,1-9,10-29,30-59,60", bins, ",")
+            for(i=1;i<=6;i++) {{
+                b=bins[i]
+                if(b=="NA")
+                    print "{wildcards.rg}", b, total[b]+0, unmapped[b]+0, "NA", "NA"
+                else
+                    print "{wildcards.rg}", b, total[b]+0, 0, lift[b]+0, accn[b]+0
+            }}
+        }}' <(cut -f4 {input.liftover} | sort -u) {input.accurate} {input.bed} > {output.table}
+        echo $SLURM_JOB_ID > logs/job_ids/stratified_table.{wildcards.rg}.jobid
+        """
+
+
+rule compress:
+    """bgzip per-RG BED files"""
+    input:
+        bed=SAMPLE + ".{rg}.bed",
+        table="{rg}.accuracy_table.tsv"
+    output:
+        gz=SAMPLE + ".{rg}.bed.gz"
+    resources:
+        mem_mb=2000,
+        cpus_per_task=1
+    shell:
+        """
+        eval $(spack load --sh {config[spack][samtools]})
+        bgzip {input.bed}
+        echo $SLURM_JOB_ID > logs/job_ids/compress.{wildcards.rg}.jobid
+        """
+
+
+rule check_jobs:
+    """Run reportseff on all SLURM jobs from this pipeline run"""
+    input:
+        tables=expand("{rg}.accuracy_table.tsv", rg=RGS),
+        compressed=expand(SAMPLE + ".{rg}.bed.gz", rg=RGS)
+    output:
+        report="logs/job_efficiency_report.txt"
+    params:
+        script=config["scripts"]["check_jobs"]
+    shell:
+        """
+        for f in logs/job_ids/*.jobid; do
+            [ -f "$f" ] || continue
+            jobid=$(cat "$f")
+            if [ -n "$jobid" ]; then
+                step=$(basename "$f" .jobid)
+                echo "=== $step (SLURM Job $jobid) ==="
+                bash {params.script} --summary "$jobid" || true
+                echo
+            fi
+        done > {output.report}
+        """

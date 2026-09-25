@@ -1,0 +1,756 @@
+---
+title: "Perform DMR analysis on methylGrapher surjected WGBS data vs Yu for CAST merged"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Input location. Set this before knitting.
+# Unlike the other analyses here, this one runs on the cluster and reads the
+# surjected methylation calls in place rather than a local copy.
+WGBS_DIR <- "" # directory holding the surjected methylC files
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = WGBS_DIR)
+set.seed(0)
+
+suppressPackageStartupMessages({
+  library(DSS)
+  library(bsseq)
+  library(data.table)
+  library(dplyr)
+  library(ggplot2)
+  library(cowplot)
+  library(GenomicRanges)
+  library(IRanges)
+  library(rtracklayer)
+})
+
+theme_set(theme_cowplot())
+```
+
+```{r}
+dirs <- c(
+  "Figures",
+  "Results",
+  "Results/multifactor",
+  "Results/multifactor/method_main_effect",
+  "Results/multifactor/method_by_strain_interaction",
+  "Results/pairwise_followup",
+  "Results/pairwise_followup/CAST",
+  "Results/pairwise_followup/BL6"
+)
+
+for (d in dirs) {
+  if (!dir.exists(d)) {
+    dir.create(d, recursive = TRUE)
+  }
+}
+```
+
+```{r}
+min_coverage <- 5
+smoothing_span <- 500
+
+p_threshold_dml_multifactor <- 0.001
+p_threshold_dmr_multifactor <- 0.01
+
+p_threshold_dml_pairwise <- 0.001
+p_threshold_dmr_pairwise <- 0.01
+```
+
+```{r}
+# Assumed sample assignment:
+# BL6 = SRX2175958, SRX2175959, SRX2175960, SRX2175961
+# CAST = SRX2175962, SRX2175963, SRX2175964, SRX2175965
+#
+# An earlier BL6 table appeared to repeat SRX2175965, which is CAST c4 here.
+
+manifest <- data.frame(
+  sample_name = c(
+    "b1_pg", "b1_Yu",
+    "b2_pg", "b2_Yu",
+    "b3_pg", "b3_Yu",
+    "b4_pg", "b4_Yu",
+    "c1_pg", "c1_Yu",
+    "c2_pg", "c2_Yu",
+    "c3_pg", "c3_Yu",
+    "c4_pg", "c4_Yu"
+  ),
+  srx = c(
+    "SRX2175958", "SRX2175958",
+    "SRX2175959", "SRX2175959",
+    "SRX2175960", "SRX2175960",
+    "SRX2175961", "SRX2175961",
+    "SRX2175962", "SRX2175962",
+    "SRX2175963", "SRX2175963",
+    "SRX2175964", "SRX2175964",
+    "SRX2175965", "SRX2175965"
+  ),
+  pair = c(
+    "b1", "b1",
+    "b2", "b2",
+    "b3", "b3",
+    "b4", "b4",
+    "c1", "c1",
+    "c2", "c2",
+    "c3", "c3",
+    "c4", "c4"
+  ),
+  strain = c(
+    "BL6", "BL6",
+    "BL6", "BL6",
+    "BL6", "BL6",
+    "BL6", "BL6",
+    "CAST", "CAST",
+    "CAST", "CAST",
+    "CAST", "CAST",
+    "CAST", "CAST"
+  ),
+  method = c(
+    "pg", "Yu",
+    "pg", "Yu",
+    "pg", "Yu",
+    "pg", "Yu",
+    "pg", "Yu",
+    "pg", "Yu",
+    "pg", "Yu",
+    "pg", "Yu"
+  ),
+  stringsAsFactors = FALSE
+)
+
+manifest$file <- ifelse(
+  manifest$method == "pg",
+  paste0(
+    "methylGrapher/Surjection/Filtered_Sorted_methylC/Sorted__",
+    manifest$srx,
+    ".filtered.cleaned.methylC.gz"
+  ),
+  paste0(
+    "Bismark_data/c57/",
+    manifest$srx,
+    "/track.cpg.methylc.gz"
+  )
+)
+
+manifest$pair <- factor(
+  manifest$pair,
+  levels = c("b1", "b2", "b3", "b4", "c1", "c2", "c3", "c4")
+)
+
+manifest$strain <- factor(
+  manifest$strain,
+  levels = c("BL6", "CAST")
+)
+
+# Set Yu as the reference so "method" tests pg vs Yu
+manifest$method <- factor(
+  manifest$method,
+  levels = c("Yu", "pg")
+)
+
+print(manifest)
+
+if (any(!file.exists(manifest$file))) {
+  stop("One or more input files are missing:\n", paste(manifest$file[!file.exists(manifest$file)], collapse = "\n"))
+}
+
+fwrite(manifest, "Results/multifactor/sample_manifest.tsv", sep = "\t")
+```
+
+```{r}
+# DSS uses count data, so convert methylation proportion * N into methylated count X.
+# The N >= 5 filter matches the earlier script, although DSS can incorporate
+# coverage depth directly.
+
+read_methylc_for_dss <- function(path, method, min_coverage = 5) {
+  df <- fread(path)
+
+  if (method == "pg") {
+    colnames(df) <- c("chr", "pos", "stop", "context", "methylation", "Strand", "N", "Flag", "Segment", "Offset")
+  } else if (method == "Yu") {
+    colnames(df) <- c("chr", "pos", "stop", "context", "methylation", "Strand", "N")
+  } else {
+    stop("Unknown method: ", method)
+  }
+
+  df$N <- as.integer(df$N)
+  df$methylation <- as.numeric(df$methylation)
+
+  df$X <- as.integer(round(df$methylation * df$N))
+
+  df$X[df$X < 0] <- 0
+  df$X[df$X > df$N] <- df$N[df$X > df$N]
+
+  df <- df %>%
+    select(chr, pos, N, X) %>%
+    filter(!is.na(chr), !is.na(pos), !is.na(N), !is.na(X)) %>%
+    filter(N >= min_coverage)
+
+  df <- as.data.table(df)
+  setorder(df, chr, pos)
+
+  return(as.data.frame(df))
+}
+```
+
+```{r}
+df_list <- vector("list", length = nrow(manifest))
+names(df_list) <- manifest$sample_name
+
+file.path(WGBS_DIR, manifest$file) -> manifest$file
+
+for (i in seq_len(nrow(manifest))) {
+  cat("Reading", manifest$sample_name[i], "from", manifest$file[i], "\n")
+  df_list[[i]] <- read_methylc_for_dss(
+    path = manifest$file[i],
+    method = as.character(manifest$method[i]),
+    min_coverage = min_coverage
+  )
+}
+
+sample_site_counts <- data.frame(
+  sample_name = manifest$sample_name,
+  n_sites = sapply(df_list, nrow),
+  stringsAsFactors = FALSE
+)
+
+print(sample_site_counts)
+fwrite(sample_site_counts, "Results/multifactor/per_sample_site_counts.tsv", sep = "\t")
+```
+
+```{r}
+bs <- makeBSseqData(df_list, sampleNames = manifest$sample_name)
+bs
+saveRDS(bs, "Results/multifactor/bsseq_object.rds")
+```
+
+```{r}
+design <- manifest %>%
+  mutate(
+    BL6_pg  = as.integer(strain == "BL6"  & method == "pg"),
+    CAST_pg = as.integer(strain == "CAST" & method == "pg")
+  ) %>%
+  select(pair, BL6_pg, CAST_pg)
+
+rownames(design) <- manifest$sample_name
+print(design)
+
+X <- model.matrix(~ 0 + pair + BL6_pg + CAST_pg, data = design)
+print(colnames(X))
+cat("Design matrix rank:", qr(X)$rank, "\n")
+cat("Design matrix ncol:", ncol(X), "\n")
+
+DMLfit <- DMLfit.multiFactor(
+  BSobj = bs,
+  design = design,
+  formula = ~ 0 + pair + BL6_pg + CAST_pg,
+  smoothing = TRUE,
+  smoothing.span = smoothing_span
+)
+
+saveRDS(DMLfit, "Results/multifactor/DMLfit_multifactor.rds")
+
+coef_names <- colnames(DMLfit$X)
+print(coef_names)
+
+coef_BL6_pg  <- match("BL6_pg", coef_names)
+coef_CAST_pg <- match("CAST_pg", coef_names)
+
+if (is.na(coef_BL6_pg) | is.na(coef_CAST_pg)) {
+  stop("Could not find BL6_pg and/or CAST_pg in fitted design matrix.")
+}
+
+dmlTest_BL6_method <- DMLtest.multiFactor(
+  DMLfit,
+  coef = coef_BL6_pg
+)
+
+dmlTest_CAST_method <- DMLtest.multiFactor(
+  DMLfit,
+  coef = coef_CAST_pg
+)
+
+L_shared <- matrix(
+  0,
+  nrow = ncol(DMLfit$X),
+  ncol = 1,
+  dimnames = list(colnames(DMLfit$X), "shared_method")
+)
+L_shared["BL6_pg", 1]  <- 1
+L_shared["CAST_pg", 1] <- 1
+
+dmlTest_shared_method <- DMLtest.multiFactor(
+  DMLfit,
+  Contrast = L_shared
+)
+
+L_method_by_strain <- matrix(
+  0,
+  nrow = ncol(DMLfit$X),
+  ncol = 1,
+  dimnames = list(colnames(DMLfit$X), "CAST_minus_BL6")
+)
+
+standardize_dss_multifactor_test <- function(x) {
+  x <- as.data.frame(x, stringsAsFactors = FALSE)
+
+  nm <- colnames(x)
+
+  chr_col  <- intersect(c("chr", "seqnames"), nm)
+  pos_col  <- intersect(c("pos", "start"), nm)
+  stat_col <- intersect(c("stat", "stats", "wald", "fstat"), nm)
+  p_col    <- intersect(c("pvals", "pval", "PVAL", "p.value"), nm)
+  fdr_col  <- intersect(c("fdrs", "fdr", "FDR", "adj.p"), nm)
+
+  if (length(chr_col) == 0)  stop("Could not find chromosome column in DSS result.")
+  if (length(pos_col) == 0)  stop("Could not find position column in DSS result.")
+  if (length(stat_col) == 0) stop("Could not find statistic column in DSS result.")
+  if (length(p_col) == 0)    stop("Could not find p-value column in DSS result.")
+  if (length(fdr_col) == 0)  stop("Could not find FDR column in DSS result.")
+
+  chr_col  <- chr_col[1]
+  pos_col  <- pos_col[1]
+  stat_col <- stat_col[1]
+  p_col    <- p_col[1]
+  fdr_col  <- fdr_col[1]
+
+  y <- data.frame(
+    chr   = as.character(x[[chr_col]]),
+    pos   = as.integer(x[[pos_col]]),
+    stat  = as.numeric(x[[stat_col]]),
+    pvals = as.numeric(x[[p_col]]),
+    fdrs  = as.numeric(x[[fdr_col]]),
+    stringsAsFactors = FALSE
+  )
+
+  # add aliases because different DSS code paths have historically used both styles
+  y$pval <- y$pvals
+  y$fdr  <- y$fdrs
+
+  y <- y[!is.na(y$chr) & !is.na(y$pos) & !is.na(y$stat) & !is.na(y$pvals), , drop = FALSE]
+  y <- y[order(y$chr, y$pos), , drop = FALSE]
+  rownames(y) <- NULL
+
+  return(y)
+}
+
+extract_dml_from_multifactor <- function(x, p.threshold) {
+  y <- x[x$pvals < p.threshold, c("chr", "pos", "stat", "pvals", "fdrs"), drop = FALSE]
+  y <- y[order(y$pvals, -abs(y$stat), y$chr, y$pos), , drop = FALSE]
+  rownames(y) <- NULL
+  return(y)
+}
+
+make_dmr_gr <- function(dmrs_df, prefix) {
+  if (nrow(dmrs_df) == 0) {
+    return(GRanges())
+  }
+
+  gr <- GRanges(
+    seqnames = dmrs_df$chr,
+    ranges = IRanges(start = dmrs_df$start, end = dmrs_df$end)
+  )
+
+  mcols(gr)$dmr_id <- paste0(prefix, seq_len(nrow(dmrs_df)))
+  mcols(gr)$areaStat <- dmrs_df$areaStat
+  mcols(gr)$sign <- sign(dmrs_df$areaStat)
+
+  return(gr)
+}
+
+classify_dmr_overlap <- function(dmrs_a, dmrs_b, prefix_a, prefix_b) {
+  gr_a <- make_dmr_gr(dmrs_a, prefix_a)
+  gr_b <- make_dmr_gr(dmrs_b, prefix_b)
+
+  if (length(gr_a) == 0) {
+    out_a <- data.frame()
+  } else {
+    out_a <- as.data.frame(dmrs_a)
+    out_a$classification <- "only_in_A"
+    out_a$overlap_partner <- NA_character_
+  }
+
+  if (length(gr_b) == 0) {
+    out_b <- data.frame()
+  } else {
+    out_b <- as.data.frame(dmrs_b)
+    out_b$classification <- "only_in_B"
+    out_b$overlap_partner <- NA_character_
+  }
+
+  if (length(gr_a) == 0 || length(gr_b) == 0) {
+    return(list(A = out_a, B = out_b))
+  }
+
+  hits <- findOverlaps(gr_a, gr_b)
+
+  if (length(hits) == 0) {
+    return(list(A = out_a, B = out_b))
+  }
+
+  hit_df <- data.frame(
+    a = queryHits(hits),
+    b = subjectHits(hits),
+    same_sign = mcols(gr_a)$sign[queryHits(hits)] == mcols(gr_b)$sign[subjectHits(hits)],
+    stringsAsFactors = FALSE
+  )
+
+  for (i in unique(hit_df$a)) {
+    sub <- hit_df[hit_df$a == i, , drop = FALSE]
+    partners <- paste(mcols(gr_b)$dmr_id[sub$b], collapse = ",")
+    out_a$overlap_partner[i] <- partners
+
+    if (any(sub$same_sign)) {
+      out_a$classification[i] <- "shared_overlap_same_direction"
+    } else {
+      out_a$classification[i] <- "shared_overlap_opposite_direction"
+    }
+  }
+
+  for (j in unique(hit_df$b)) {
+    sub <- hit_df[hit_df$b == j, , drop = FALSE]
+    partners <- paste(mcols(gr_a)$dmr_id[sub$a], collapse = ",")
+    out_b$overlap_partner[j] <- partners
+
+    if (any(sub$same_sign)) {
+      out_b$classification[j] <- "shared_overlap_same_direction"
+    } else {
+      out_b$classification[j] <- "shared_overlap_opposite_direction"
+    }
+  }
+
+  return(list(A = out_a, B = out_b))
+}
+
+# Standardize only the two successful coef-based multifactor test objects
+dmlTest_BL6_method  <- standardize_dss_multifactor_test(dmlTest_BL6_method)
+dmlTest_CAST_method <- standardize_dss_multifactor_test(dmlTest_CAST_method)
+
+fwrite(dmlTest_BL6_method,  "Results/multifactor/dmlTest_BL6_method.standardized.tsv.gz", sep = "\t")
+fwrite(dmlTest_CAST_method, "Results/multifactor/dmlTest_CAST_method.standardized.tsv.gz", sep = "\t")
+
+saveRDS(dmlTest_BL6_method,  "Results/multifactor/dmlTest_BL6_method.standardized.rds")
+saveRDS(dmlTest_CAST_method, "Results/multifactor/dmlTest_CAST_method.standardized.rds")
+
+# DMLs: manual extraction, not callDML()
+dmls_BL6_method <- extract_dml_from_multifactor(
+  dmlTest_BL6_method,
+  p.threshold = p_threshold_dml_multifactor
+)
+
+dmls_CAST_method <- extract_dml_from_multifactor(
+  dmlTest_CAST_method,
+  p.threshold = p_threshold_dml_multifactor
+)
+
+fwrite(dmls_BL6_method,  "Results/multifactor/dmls_BL6_method.tsv.gz", sep = "\t")
+fwrite(dmls_CAST_method, "Results/multifactor/dmls_CAST_method.tsv.gz", sep = "\t")
+
+# DMRs: callDMR() on standardized coef-based multifactor test results
+dmrs_BL6_method <- callDMR(
+  dmlTest_BL6_method,
+  delta = 0,
+  p.threshold = p_threshold_dmr_multifactor
+)
+
+dmrs_CAST_method <- callDMR(
+  dmlTest_CAST_method,
+  delta = 0,
+  p.threshold = p_threshold_dmr_multifactor
+)
+
+if (is.null(dmrs_BL6_method)) dmrs_BL6_method <- data.frame()
+if (is.null(dmrs_CAST_method)) dmrs_CAST_method <- data.frame()
+
+fwrite(dmrs_BL6_method,  "Results/multifactor/dmrs_BL6_method.tsv.gz", sep = "\t")
+fwrite(dmrs_CAST_method, "Results/multifactor/dmrs_CAST_method.tsv.gz", sep = "\t")
+
+# DML-level shared vs strain-specific classification
+dml_merge <- merge(
+  dmlTest_BL6_method[, c("chr", "pos", "stat", "pvals", "fdrs")],
+  dmlTest_CAST_method[, c("chr", "pos", "stat", "pvals", "fdrs")],
+  by = c("chr", "pos"),
+  suffixes = c(".BL6", ".CAST"),
+  all = FALSE
+)
+
+dml_merge$BL6_sig  <- !is.na(dml_merge$pvals.BL6)  & dml_merge$pvals.BL6  < p_threshold_dml_multifactor
+dml_merge$CAST_sig <- !is.na(dml_merge$pvals.CAST) & dml_merge$pvals.CAST < p_threshold_dml_multifactor
+dml_merge$same_direction <- sign(dml_merge$stat.BL6) == sign(dml_merge$stat.CAST)
+
+dml_merge$classification <- "not_significant"
+dml_merge$classification[dml_merge$BL6_sig & !dml_merge$CAST_sig] <- "BL6_only"
+dml_merge$classification[!dml_merge$BL6_sig & dml_merge$CAST_sig] <- "CAST_only"
+dml_merge$classification[dml_merge$BL6_sig & dml_merge$CAST_sig & dml_merge$same_direction] <- "shared_same_direction"
+dml_merge$classification[dml_merge$BL6_sig & dml_merge$CAST_sig & !dml_merge$same_direction] <- "shared_opposite_direction"
+
+fwrite(dml_merge, "Results/multifactor/dml_site_classification_BL6_vs_CAST.tsv.gz", sep = "\t")
+
+# DMR-level shared vs strain-specific classification by overlap
+dmr_class <- classify_dmr_overlap(
+  dmrs_a = dmrs_BL6_method,
+  dmrs_b = dmrs_CAST_method,
+  prefix_a = "BL6_",
+  prefix_b = "CAST_"
+)
+
+dmrs_BL6_classified <- dmr_class$A
+dmrs_CAST_classified <- dmr_class$B
+
+fwrite(dmrs_BL6_classified,  "Results/multifactor/dmrs_BL6_method.classified.tsv.gz", sep = "\t")
+fwrite(dmrs_CAST_classified, "Results/multifactor/dmrs_CAST_method.classified.tsv.gz", sep = "\t")
+
+summary_counts <- data.frame(
+  metric = c(
+    "BL6_method_DMLs",
+    "CAST_method_DMLs",
+    "BL6_method_DMRs",
+    "CAST_method_DMRs",
+    "DML_shared_same_direction",
+    "DML_shared_opposite_direction",
+    "DML_BL6_only",
+    "DML_CAST_only",
+    "DMR_BL6_shared_same_direction",
+    "DMR_BL6_shared_opposite_direction",
+    "DMR_BL6_only",
+    "DMR_CAST_shared_same_direction",
+    "DMR_CAST_shared_opposite_direction",
+    "DMR_CAST_only"
+  ),
+  value = c(
+    nrow(dmls_BL6_method),
+    nrow(dmls_CAST_method),
+    nrow(dmrs_BL6_method),
+    nrow(dmrs_CAST_method),
+    sum(dml_merge$classification == "shared_same_direction"),
+    sum(dml_merge$classification == "shared_opposite_direction"),
+    sum(dml_merge$classification == "BL6_only"),
+    sum(dml_merge$classification == "CAST_only"),
+    if (nrow(dmrs_BL6_classified) == 0) 0 else sum(dmrs_BL6_classified$classification == "shared_overlap_same_direction"),
+    if (nrow(dmrs_BL6_classified) == 0) 0 else sum(dmrs_BL6_classified$classification == "shared_overlap_opposite_direction"),
+    if (nrow(dmrs_BL6_classified) == 0) 0 else sum(dmrs_BL6_classified$classification == "only_in_A"),
+    if (nrow(dmrs_CAST_classified) == 0) 0 else sum(dmrs_CAST_classified$classification == "shared_overlap_same_direction"),
+    if (nrow(dmrs_CAST_classified) == 0) 0 else sum(dmrs_CAST_classified$classification == "shared_overlap_opposite_direction"),
+    if (nrow(dmrs_CAST_classified) == 0) 0 else sum(dmrs_CAST_classified$classification == "only_in_B")
+  ),
+  stringsAsFactors = FALSE
+)
+
+print(summary_counts)
+fwrite(summary_counts, "Results/multifactor/summary_counts.BL6_vs_CAST_coef_based.tsv", sep = "\t")
+```
+
+
+```{r fig.width=4, fig.height=4}
+dml_class_counts <- dml_merge %>%
+  filter(classification != "not_significant") %>%
+  count(classification) %>%
+  mutate(
+    classification = factor(
+      classification,
+      levels = c(
+        "shared_same_direction",
+        "shared_opposite_direction",
+        "BL6_only",
+        "CAST_only"
+      )
+    )
+  )
+
+p_dml_class_counts <- ggplot(dml_class_counts, aes(x = classification, y = n)) +
+  geom_col() +
+  geom_text(aes(label = n), vjust = -0.3, size = 3) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+  labs(
+    title = "DML classes",
+    x = "",
+    y = "Count"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1)
+  )
+
+p_dml_class_counts
+
+ggsave(
+  "Figures/DML_class_counts.pdf",
+  p_dml_class_counts,
+  width = 4,
+  height = 4
+)
+```
+
+
+```{r fig.width=6, fig.height=4}
+volcano_df <- bind_rows(
+  dml_merge %>%
+    transmute(
+      strain = "BL6",
+      chr = chr,
+      pos = pos,
+      stat = stat.BL6,
+      pvals = pvals.BL6,
+      classification = case_when(
+        classification == "BL6_only" ~ "strain_only",
+        classification == "shared_same_direction" ~ "shared_same_direction",
+        classification == "shared_opposite_direction" ~ "shared_opposite_direction",
+        TRUE ~ "not_significant"
+      )
+    ),
+  dml_merge %>%
+    transmute(
+      strain = "CAST",
+      chr = chr,
+      pos = pos,
+      stat = stat.CAST,
+      pvals = pvals.CAST,
+      classification = case_when(
+        classification == "CAST_only" ~ "strain_only",
+        classification == "shared_same_direction" ~ "shared_same_direction",
+        classification == "shared_opposite_direction" ~ "shared_opposite_direction",
+        TRUE ~ "not_significant"
+      )
+    )
+) %>%
+  mutate(
+    neglog10p = -log10(pvals),
+    classification = factor(
+      classification,
+      levels = c(
+        "not_significant",
+        "strain_only",
+        "shared_same_direction",
+        "shared_opposite_direction"
+      )
+    )
+  )
+
+p_volcano <- ggplot(volcano_df, aes(x = stat, y = neglog10p, color = classification)) +
+  geom_point(size = 0.3, alpha = 0.5) +
+  geom_hline(yintercept = -log10(p_threshold_dml_multifactor), linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  facet_wrap(~ strain, ncol = 1) +
+  labs(
+    title = "DML volcano",
+    x = "Wald stat",
+    y = "-log10(p)"
+  )
+
+p_volcano
+
+ggsave(
+  "Figures/DML_volcano_by_strain.pdf",
+  p_volcano,
+  width = 4,
+  height = 4
+)
+```
+
+```{r fig.width=4, fig.height=4}
+dmr_class_counts <- bind_rows(
+  dmrs_BL6_classified %>%
+    transmute(strain = "BL6", classification = classification),
+  dmrs_CAST_classified %>%
+    transmute(strain = "CAST", classification = classification)
+) %>%
+  count(strain, classification)
+
+p_dmr_class_counts <- ggplot(dmr_class_counts, aes(x = classification, y = n)) +
+  geom_col() +
+  facet_wrap(~ strain, ncol = 1) +
+  labs(
+    title = "DMR classes",
+    x = "",
+    y = "Count"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1)
+  )
+
+p_dmr_class_counts
+
+ggsave(
+  "Figures/DMR_class_counts.pdf",
+  p_dmr_class_counts,
+  width = 4,
+  height = 4
+)
+```
+
+```{r}
+cast_only_dml <- dml_merge %>%
+  filter(classification == "CAST_only") %>%
+  arrange(chr, pos)
+
+cast_only_dmr <- dmrs_CAST_classified %>%
+  filter(classification == "only_in_B") %>%
+  arrange(chr, start, end)
+
+fwrite(
+  cast_only_dml,
+  "Results/multifactor/CAST_only_DMLs.tsv.gz",
+  sep = "\t"
+)
+
+fwrite(
+  cast_only_dmr,
+  "Results/multifactor/CAST_only_DMRs.tsv.gz",
+  sep = "\t"
+)
+
+cast_only_dml_bed <- cast_only_dml %>%
+  transmute(
+    chr = chr,
+    start = pos - 1L,
+    end = pos,
+    name = paste0(
+      "CAST_only_DML;",
+      "BL6_p=", signif(pvals.BL6, 3), ";",
+      "CAST_p=", signif(pvals.CAST, 3), ";",
+      "BL6_stat=", signif(stat.BL6, 4), ";",
+      "CAST_stat=", signif(stat.CAST, 4)
+    ),
+    score = pmin(1000L, as.integer(round(-log10(pvals.CAST) * 100))),
+    strand = "."
+  )
+
+cast_only_dmr_bed <- cast_only_dmr %>%
+  transmute(
+    chr = chr,
+    start = start,
+    end = end,
+    name = paste0(
+      "CAST_only_DMR;",
+      "nCG=", nCG, ";",
+      "length=", length, ";",
+      "areaStat=", signif(areaStat, 4)
+    ),
+    score = pmin(1000L, as.integer(round(abs(areaStat)))),
+    strand = "."
+  )
+
+fwrite(
+  cast_only_dml_bed,
+  "Results/multifactor/CAST_only_DMLs.browser.bed",
+  sep = "\t",
+  col.names = FALSE
+)
+
+fwrite(
+  cast_only_dmr_bed,
+  "Results/multifactor/CAST_only_DMRs.browser.bed",
+  sep = "\t",
+  col.names = FALSE
+)
+
+cat("CAST-only DMLs:", nrow(cast_only_dml), "\n")
+cat("CAST-only DMRs:", nrow(cast_only_dmr), "\n")
+
+head(cast_only_dml)
+head(cast_only_dmr)
+```

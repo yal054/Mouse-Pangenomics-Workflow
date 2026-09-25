@@ -1,0 +1,514 @@
+---
+title: "Visualize graph stats"
+author: "CIG @ MGI"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r config, include=FALSE}
+# Repository location, separate from DATA_ROOT. Replace with the absolute path
+# to your clone (the directory containing shared-R).
+REPO_ROOT <- "/path/to/repo"
+REPO_ROOT <- normalizePath(REPO_ROOT, mustWork = TRUE)
+# Input locations. Set these before knitting.
+DATA_ROOT <- "" # project data directory (per-analysis subdirectories)
+```
+
+```{r setup, include=FALSE}
+set.seed(0)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = file.path(DATA_ROOT, "Graph_descriptive_statistics/"))
+
+library(ggplot2)
+library(cowplot)
+library(scales)
+library("dplyr")
+library(factoextra)
+library(tidyr)
+source(file.path(REPO_ROOT, "shared-R", "JFMV_2025_Aesthetic.R"))
+library(ggrepel)
+library(data.table)
+```
+
+```{r}
+clean_graph_name <- function(x) {
+  x <- basename(x)
+  x <- gsub("\\.stats$", "", x)
+  x <- gsub("\\.full\\.panacus-hist\\.tsv$", "", x)
+  x <- gsub("\\.full$", "", x)
+  
+  x <- gsub("^DMP$", "DMP", x)
+  x <- gsub("^Founder$", "Founder", x)
+  x <- gsub("^Yu-T2T_v2-refs_Keane-T2T_v3-founders$", "Founder", x)
+  
+  return(x)
+}
+
+load_vg_stats <- function(stats_dir, file_name) {
+  file_path <- file.path(stats_dir, file_name)
+  
+  print(file_path)
+  
+  if (!file.exists(file_path)) {
+    return(NULL)
+  }
+  
+  data <- fread(file_path, header = FALSE, fill = TRUE)
+  data$graph <- clean_graph_name(stats_dir)
+  data$source_file <- file_name
+  
+  return(data)
+}
+
+load_degree_stats <- function(stats_dir) {
+  degree_file <- list.files(
+    stats_dir,
+    pattern = "^stats__degree_distribution__.*\\.txt$",
+    full.names = TRUE
+  )
+  
+  if (length(degree_file) == 0) {
+    return(NULL)
+  }
+  
+  if (length(degree_file) > 1) {
+    stop(paste0("More than one degree distribution file found in: ", stats_dir))
+  }
+  
+  print(degree_file)
+  
+  data <- fread(degree_file, header = TRUE, fill = TRUE)
+  
+  degree_graph <- basename(degree_file)
+  degree_graph <- gsub("^stats__degree_distribution__", "", degree_graph)
+  degree_graph <- gsub("\\.txt$", "", degree_graph)
+  degree_graph <- clean_graph_name(degree_graph)
+  
+  if (!"Degree" %in% colnames(data)) {
+    colnames(data)[1] <- "Degree"
+  }
+  
+  node_count_column <- grep("Nodes.*total|Nodes.total|nodes.*total|nodes", colnames(data), value = TRUE)[1]
+  
+  if (is.na(node_count_column)) {
+    node_count_column <- setdiff(colnames(data), "Degree")[1]
+  }
+  
+  colnames(data)[colnames(data) == node_count_column] <- "Nodes.total."
+  
+  data$Degree <- as.numeric(data$Degree)
+  data$Nodes.total. <- as.numeric(data$Nodes.total.)
+  data$graph <- degree_graph
+  data$source_file <- basename(degree_file)
+  
+  return(data)
+}
+
+load_panacus_stats <- function(file_name) {
+  print(file_name)
+  
+  raw_lines <- readLines(file_name)
+  
+  raw_lines <- raw_lines[!grepl("^\\s*$", raw_lines)]
+  raw_lines <- raw_lines[!grepl("^\\s*#", raw_lines)]
+  
+  parsed_rows <- lapply(raw_lines, function(x) {
+    numeric_values <- regmatches(
+      x,
+      gregexpr("[-+]?[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?", x)
+    )[[1]]
+    
+    if (length(numeric_values) < 2) {
+      return(NULL)
+    }
+    
+    data.frame(
+      assemblies = as.numeric(numeric_values[1]),
+      count = as.numeric(numeric_values[2])
+    )
+  })
+  
+  data <- bind_rows(parsed_rows)
+  
+  if (nrow(data) == 0) {
+    stop(paste0("No numeric panacus rows were parsed from: ", file_name))
+  }
+  
+  data$graph <- clean_graph_name(file_name)
+  
+  return(data)
+}
+```
+
+
+```{r}
+stats_dirs <- list.dirs("vg_stats", recursive = FALSE, full.names = TRUE)
+stats_dirs <- stats_dirs[file.exists(file.path(stats_dirs, "graph-stats.tsv"))]
+
+graph_stats_dataframe <- lapply(stats_dirs, function(stats_dir) {
+  load_vg_stats(stats_dir, "graph-stats.tsv")
+}) %>% bind_rows()
+
+sample_stats_dataframe <- lapply(stats_dirs, function(stats_dir) {
+  load_vg_stats(stats_dir, "sample-stats.tsv")
+}) %>% bind_rows()
+
+path_stats_dataframe <- lapply(stats_dirs, function(stats_dir) {
+  load_vg_stats(stats_dir, "path-stats.tsv")
+}) %>% bind_rows()
+
+clip_stats_dataframe <- lapply(stats_dirs, function(stats_dir) {
+  load_vg_stats(stats_dir, "clip-stats.bed")
+}) %>% bind_rows()
+
+panacus_files <- list.files(
+  "pancus",
+  pattern = "\\.full\\.panacus-hist\\.tsv$",
+  full.names = TRUE
+)
+
+panacus_dataframe <- lapply(panacus_files, function(file_name) {
+  load_panacus_stats(file_name)
+}) %>% bind_rows()
+
+colnames(graph_stats_dataframe)[1:3] <- c("chrom", "statistic", "value")
+colnames(sample_stats_dataframe)[1:3] <- c("chrom", "sample", "value")
+colnames(path_stats_dataframe)[1:3] <- c("chrom", "path", "value")
+
+graph_stats_dataframe$value <- as.numeric(graph_stats_dataframe$value)
+sample_stats_dataframe$value <- as.numeric(sample_stats_dataframe$value)
+path_stats_dataframe$value <- as.numeric(path_stats_dataframe$value)
+
+degree_dataframe <- lapply(stats_dirs, function(stats_dir) {
+  load_degree_stats(stats_dir)
+}) %>% bind_rows()
+
+print("degree_dataframe")
+print(head(degree_dataframe))
+print(colnames(degree_dataframe))
+print(unique(degree_dataframe$graph))
+
+print("graph_stats_dataframe")
+print(head(graph_stats_dataframe))
+print(unique(graph_stats_dataframe$graph))
+
+print("sample_stats_dataframe")
+print(head(sample_stats_dataframe))
+print(unique(sample_stats_dataframe$graph))
+
+print("path_stats_dataframe")
+print(head(path_stats_dataframe))
+print(unique(path_stats_dataframe$graph))
+
+print("panacus_dataframe")
+print(head(panacus_dataframe))
+print(unique(panacus_dataframe$graph))
+```
+
+```{r}
+graph_stats_dataframe$graph_group <- NA_character_
+graph_stats_dataframe[grep("DMP", graph_stats_dataframe$graph),]$graph_group <- "DMP"
+graph_stats_dataframe[grep("Founder", graph_stats_dataframe$graph),]$graph_group <- "Founder"
+
+sample_stats_dataframe$graph_group <- NA_character_
+sample_stats_dataframe[grep("DMP", sample_stats_dataframe$graph),]$graph_group <- "DMP"
+sample_stats_dataframe[grep("Founder", sample_stats_dataframe$graph),]$graph_group <- "Founder"
+
+path_stats_dataframe$graph_group <- NA_character_
+path_stats_dataframe[grep("DMP", path_stats_dataframe$graph),]$graph_group <- "DMP"
+path_stats_dataframe[grep("Founder", path_stats_dataframe$graph),]$graph_group <- "Founder"
+
+clip_stats_dataframe$graph_group <- NA_character_
+clip_stats_dataframe[grep("DMP", clip_stats_dataframe$graph),]$graph_group <- "DMP"
+clip_stats_dataframe[grep("Founder", clip_stats_dataframe$graph),]$graph_group <- "Founder"
+
+panacus_dataframe$graph_group <- NA_character_
+panacus_dataframe[grep("DMP", panacus_dataframe$graph),]$graph_group <- "DMP"
+panacus_dataframe[grep("Founder", panacus_dataframe$graph),]$graph_group <- "Founder"
+
+degree_dataframe$graph_group <- NA_character_
+degree_dataframe[grep("DMP", degree_dataframe$graph),]$graph_group <- "DMP"
+degree_dataframe[grep("Founder", degree_dataframe$graph),]$graph_group <- "Founder"
+
+c(
+  "DMP" = "#697cd4",
+  "Founder" = "#b8893a"
+) -> GRAPH_COLORS
+
+graph_stats_dataframe$graph <- factor(graph_stats_dataframe$graph, levels = c("DMP", "Founder"))
+sample_stats_dataframe$graph <- factor(sample_stats_dataframe$graph, levels = c("DMP", "Founder"))
+path_stats_dataframe$graph <- factor(path_stats_dataframe$graph, levels = c("DMP", "Founder"))
+clip_stats_dataframe$graph <- factor(clip_stats_dataframe$graph, levels = c("DMP", "Founder"))
+panacus_dataframe$graph <- factor(panacus_dataframe$graph, levels = c("DMP", "Founder"))
+degree_dataframe$graph <- factor(degree_dataframe$graph, levels = c("DMP", "Founder"))
+```
+
+
+```{r}
+as.numeric(panacus_dataframe$count) -> panacus_dataframe$count
+as.numeric(panacus_dataframe$assemblies) -> panacus_dataframe$assemblies
+
+print("Nonzero panacus ranges by graph:")
+panacus_dataframe %>%
+  filter(count != 0) %>%
+  group_by(graph) %>%
+  summarize(
+    min_assemblies = min(assemblies),
+    max_assemblies = max(assemblies),
+    n_nonzero_bins = n(),
+    total_count = sum(count),
+    .groups = "drop"
+  ) %>%
+  print()
+
+# Remove hardcoded/padded Panacus bins with zero counts.
+panacus_dataframe <- panacus_dataframe[panacus_dataframe$count != 0,]
+
+# Sort before cumulative calculations.
+panacus_dataframe <- panacus_dataframe[order(panacus_dataframe$graph, panacus_dataframe$assemblies),]
+
+panacus_dataframe$percentage <- NA
+panacus_dataframe$cumulative <- NA
+panacus_dataframe$Percent.assemblies <- NA
+
+for (GRAPH in unique(panacus_dataframe$graph)) {
+  panacus_dataframe[panacus_dataframe$graph == GRAPH,]$percentage <-
+    panacus_dataframe[panacus_dataframe$graph == GRAPH,]$count /
+    sum(panacus_dataframe[panacus_dataframe$graph == GRAPH,]$count) * 100
+  
+  panacus_dataframe[panacus_dataframe$graph == GRAPH,]$cumulative <-
+    cumsum(panacus_dataframe[panacus_dataframe$graph == GRAPH,]$percentage)
+  
+  panacus_dataframe[panacus_dataframe$graph == GRAPH,]$Percent.assemblies <-
+    panacus_dataframe[panacus_dataframe$graph == GRAPH,]$assemblies /
+    max(panacus_dataframe[panacus_dataframe$graph == GRAPH,]$assemblies)
+}
+
+row.names(panacus_dataframe) <- NULL
+```
+
+```{r}
+# Summarize graph-level stats across chromosomes.
+graph_stats_summary_dataframe <- graph_stats_dataframe %>%
+  group_by(graph, graph_group, statistic) %>%
+  summarize(
+    total_value = sum(value, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Summarize sample stats across chromosomes.
+sample_stats_summary_dataframe <- sample_stats_dataframe %>%
+  group_by(graph, graph_group, sample) %>%
+  summarize(
+    total_value = sum(value, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Parse path names into sample / haplotype / path chromosome / interval fields.
+path_name_parts <- strsplit(as.character(path_stats_dataframe$path), "#", fixed = TRUE)
+
+path_stats_dataframe$path_sample <- sapply(path_name_parts, function(x) {
+  if (length(x) >= 1) x[1] else NA
+})
+
+path_stats_dataframe$path_haplotype <- sapply(path_name_parts, function(x) {
+  if (length(x) >= 2) x[2] else NA
+})
+
+path_stats_dataframe$path_chrom <- sapply(path_name_parts, function(x) {
+  if (length(x) >= 3) x[3] else NA
+})
+
+path_stats_dataframe$path_interval <- sapply(path_name_parts, function(x) {
+  if (length(x) >= 4) x[4] else NA
+})
+
+# Summarize path stats by parsed sample and haplotype.
+path_stats_summary_dataframe <- path_stats_dataframe %>%
+  group_by(graph, graph_group, path_sample, path_haplotype) %>%
+  summarize(
+    total_value = sum(value, na.rm = TRUE),
+    n_paths = n(),
+    .groups = "drop"
+  )
+
+# Parse clip-stats.bed conservatively.
+clip_stat_columns <- setdiff(colnames(clip_stats_dataframe), c("graph", "source_file", "graph_group"))
+
+colnames(clip_stats_dataframe)[colnames(clip_stats_dataframe) == clip_stat_columns[1]] <- "chrom"
+colnames(clip_stats_dataframe)[colnames(clip_stats_dataframe) == clip_stat_columns[2]] <- "start"
+colnames(clip_stats_dataframe)[colnames(clip_stats_dataframe) == clip_stat_columns[3]] <- "end"
+
+if (length(clip_stat_columns) >= 4) {
+  colnames(clip_stats_dataframe)[colnames(clip_stats_dataframe) == clip_stat_columns[4]] <- "clip_name"
+}
+
+if (length(clip_stat_columns) >= 5) {
+  colnames(clip_stats_dataframe)[colnames(clip_stats_dataframe) == clip_stat_columns[5]] <- "clip_value"
+}
+
+clip_stats_dataframe$start <- as.numeric(clip_stats_dataframe$start)
+clip_stats_dataframe$end <- as.numeric(clip_stats_dataframe$end)
+clip_stats_dataframe$width <- clip_stats_dataframe$end - clip_stats_dataframe$start
+
+clip_stats_summary_dataframe <- clip_stats_dataframe %>%
+  group_by(graph, graph_group) %>%
+  summarize(
+    n_clip_intervals = n(),
+    total_clip_bp = sum(width, na.rm = TRUE),
+    mean_clip_width = mean(width, na.rm = TRUE),
+    median_clip_width = median(width, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+print("graph_stats_summary_dataframe")
+print(graph_stats_summary_dataframe)
+
+print("sample_stats_summary_dataframe")
+print(head(sample_stats_summary_dataframe))
+
+print("path_stats_summary_dataframe")
+print(head(path_stats_summary_dataframe))
+
+print("clip_stats_summary_dataframe")
+print(clip_stats_summary_dataframe)
+```
+
+```{r}
+graph_stats_plot_dataframe <- graph_stats_summary_dataframe
+
+p_graph_stats <- ggplot(
+  subset(graph_stats_plot_dataframe, statistic != "length" ),
+  aes(y = statistic, x = total_value / 1000000, fill = graph)
+) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_x_continuous(
+    expand = expansion(mult = c(0, 0.10))
+  ) +
+  scale_fill_manual(values = GRAPH_COLORS) +
+  theme_cowplot() +
+  labs(y = NULL, x = "Number (millions)") +
+  theme(
+    legend.position = "top",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.4, "cm"),
+    legend.key.height = unit(0.25, "cm"),
+    legend.spacing.x = unit(0.05, "cm"),
+    legend.spacing.y = unit(0.01, "cm")
+  )
+
+p_graph_stats
+
+ggsave("graph_stats_summary_DMP_Founder.png", p_graph_stats, width = 8, height = 4, dpi = 600)
+ggsave("graph_stats_summary_DMP_Founder.svg", p_graph_stats, width = 8, height = 4)
+```
+
+```{r}
+p_degree <- ggplot(
+  degree_dataframe,
+  aes(x = Degree, y = Nodes.total. / 1000000, fill = graph)
+) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_x_continuous(
+    breaks = seq(0, max(degree_dataframe$Degree, na.rm = TRUE), 5),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    limits = c(0, 1.1 * max(degree_dataframe$Nodes.total., na.rm = TRUE) / 1000000),
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(values = GRAPH_COLORS) +
+  theme_cowplot() +
+  labs(x = "Degree", y = "Nodes (millions)") +
+  theme(legend.position = "none") +
+  ggbreak::scale_y_break(c(3, 5, 15, 16), scales = 0.5) +
+  theme(
+    axis.ticks.y.right = element_blank(),
+    axis.text.y.right = element_blank(),
+    axis.line.y.right = element_blank()
+  )
+
+p_degree
+
+ggsave("degree_distribution_DMP_Founder.png", p_degree, width = 8, height = 4, dpi = 600)
+ggsave("degree_distribution_DMP_Founder.svg", p_degree, width = 8, height = 4)
+```
+
+```{r}
+degree_dataframe %>%
+  group_by(graph) %>%
+  summarise(
+    pct_lt3 = 100*sum(Nodes.total.[Degree < 3], na.rm=T)/sum(Nodes.total., na.rm=T),
+    pct_gt5 = 100*sum(Nodes.total.[Degree > 5], na.rm=T)/sum(Nodes.total., na.rm=T)
+  )
+```
+
+```{r}
+panacus_plot_dataframe <- panacus_dataframe[panacus_dataframe$assemblies != 0,]
+
+ggplot(panacus_plot_dataframe, aes(x = 100 * Percent.assemblies, y = percentage, color = graph)) +
+  geom_line(size = 1) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5)) +
+  labs(title = NULL, x = "%Assemblies with segment", y = "%Segments") +
+  theme_cowplot() +
+  scale_color_manual(values = GRAPH_COLORS) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(legend.position = "none") -> p_cum_full
+
+p_cum_full
+
+ggsave("CumulativePercentageFullGraphPanacus_DMP_Founder.png", p_cum_full, width = 8, height = 4, dpi = 600)
+ggsave("CumulativePercentageFullGraphPanacus_DMP_Founder.svg", p_cum_full, width = 8, height = 4)
+```
+
+```{r}
+panacus_plot_dataframe <- panacus_dataframe[panacus_dataframe$assemblies != 0,]
+
+print(unique(graph_stats_dataframe$statistic))
+```
+
+```{r}
+panacus_plot_dataframe <- panacus_dataframe[panacus_dataframe$assemblies != 0,]
+
+ggplot(panacus_plot_dataframe, aes(x = assemblies, y = percentage, fill = graph)) +
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5)) +
+  labs(title = "Full Graphs", x = "Number of haplotypes", y = "Percentage") +
+  theme_cowplot() +
+  scale_fill_manual(values = GRAPH_COLORS) +
+  scale_x_continuous(
+    breaks = pretty(panacus_plot_dataframe$assemblies),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0.10))
+  ) +
+  facet_wrap(graph ~ ., scales = "free") -> p1
+
+p1
+
+# save as svg
+ggsave("FullGraphPanacus_DMP_Founder.png", p1, width = 8, height = 4, dpi = 600)
+ggsave("FullGraphPanacus_DMP_Founder.svg", p1, width = 8, height = 4)
+```
+
+```{r}
+print("What percent are at Node=1?")
+
+panacus_dataframe %>%
+  filter(assemblies == 1) %>%
+  select(graph, assemblies, count, percentage, cumulative) %>%
+  print()
+
+print("What percent are at the max nonzero Node?")
+
+panacus_dataframe %>%
+  group_by(graph) %>%
+  filter(assemblies == max(assemblies)) %>%
+  select(graph, assemblies, count, percentage, cumulative) %>%
+  ungroup() %>%
+  print()
+```
+
