@@ -23,6 +23,10 @@ Each directory contains a `README.md` with detailed instructions on required inp
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
 
+## Cite
+
+[![DOI](https://zenodo.org/badge/922248507.svg)](https://doi.org/10.5281/zenodo.22967940)
+
 ## Contact
 
 For questions, please open an issue.
